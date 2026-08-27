@@ -335,6 +335,15 @@ pub fn Runtime(comptime App: type) type {
                     .login => try beginSignIn(app, true),
                     .chatgpt_login => try beginChatGptSignIn(app),
                     .grok_login => try beginGrokSignIn(app),
+                    // There is no sign-in flow to start: the key is read from
+                    // the environment, so report how to supply it.
+                    .openrouter_key => try app.writeDomainNotice(.{
+                        .topic = "auth",
+                        .tone = .information,
+                        .body = "OpenRouter reads " ++ credentials.openrouter_api_key_env ++
+                            " from the environment. Set it, restart fx, then choose " ++
+                            "OpenRouter under Model provider.",
+                    }, true),
                     .setup => {
                         if (comptime !runtime_profile.allows(App, .native_auth)) {
                             try app.writeDomainNotice(.{

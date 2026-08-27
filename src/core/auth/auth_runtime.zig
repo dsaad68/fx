@@ -33,6 +33,7 @@ const credential_source_order = [_]credentials.Source{
     .stored_key,
     .chatgpt_subscription,
     .grok_subscription,
+    .openrouter_api_key,
 };
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
@@ -315,6 +316,9 @@ pub const AcquisitionAction = enum {
     chatgpt_login,
     grok_login,
     setup,
+    /// OpenRouter authenticates from the environment, so this row reports
+    /// whether the key is present rather than starting a sign-in flow.
+    openrouter_key,
     change_team,
     switch_credential,
     switch_provider,
@@ -644,7 +648,7 @@ pub const PickerView = struct {
             else
                 4,
             .connections => connectionChoiceCount(),
-            .provider => if (comptime host_target.is_wasm) 2 else 3,
+            .provider => if (comptime host_target.is_wasm) 2 else 4,
             .sign_in, .api_key => 0,
             .change_team => blk: {
                 var count: usize = 0;
@@ -678,6 +682,9 @@ pub const PickerView = struct {
                 0 => .{ .provider = .gateway },
                 1 => .{ .provider = .codex },
                 2 => if (comptime host_target.is_wasm) null else .{ .provider = .grok },
+                // OpenRouter needs no browser flow, but its transport is native
+                // only, so the WASM host does not offer it.
+                3 => if (comptime host_target.is_wasm) null else .{ .provider = .openrouter },
                 else => null,
             },
             .sign_in, .api_key => null,
@@ -722,6 +729,7 @@ pub const PickerView = struct {
                 .login => "Sign in with Vercel",
                 .chatgpt_login => "Sign in with Codex",
                 .grok_login => "Sign in with Grok",
+                .openrouter_key => "OpenRouter API key",
                 .setup => if (self.include_skip) "Add an API key" else "API key",
                 .change_team => "Change team",
                 .switch_credential => "Switch credential",
@@ -741,6 +749,7 @@ pub const PickerView = struct {
                 .login => if (self.fx_login_session_available) "connected" else "",
                 .chatgpt_login => if (self.available_sources.contains(.chatgpt_subscription)) "connected" else "",
                 .grok_login => if (self.available_sources.contains(.grok_subscription)) "connected" else "",
+                .openrouter_key => if (self.available_sources.contains(.openrouter_api_key)) "connected" else "",
                 .setup, .switch_credential, .switch_provider => "",
                 .automatic => "use the first available source",
                 .change_team => if (self.fx_login_session_available) "choose a team" else "sign in first",
@@ -753,7 +762,8 @@ pub const PickerView = struct {
         return switch (choice) {
             .action => |action| (action != .change_team or self.fx_login_session_available) and
                 (action != .chatgpt_login or !host_target.is_wasm) and
-                (action != .grok_login or !host_target.is_wasm),
+                (action != .grok_login or !host_target.is_wasm) and
+                (action != .openrouter_key or !host_target.is_wasm),
             .provider, .source, .team => true,
         };
     }
@@ -767,7 +777,7 @@ pub const PickerView = struct {
 };
 
 fn connectionChoiceCount() usize {
-    return if (comptime host_target.is_wasm) 2 else 4;
+    return if (comptime host_target.is_wasm) 2 else 5;
 }
 
 fn connectionChoiceAt(index: usize) ?Choice {
@@ -783,6 +793,7 @@ fn connectionChoiceAt(index: usize) ?Choice {
         1 => .{ .action = .chatgpt_login },
         2 => .{ .action = .grok_login },
         3 => .{ .action = .setup },
+        4 => .{ .action = .openrouter_key },
         else => null,
     };
 }
@@ -1790,7 +1801,7 @@ pub const Runtime = struct {
             .sign_in, .api_key => unreachable,
             .connections => switch (selected) {
                 .action => |action| switch (action) {
-                    .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
+                    .login, .chatgpt_login, .grok_login, .openrouter_key => self.closePicker(alloc),
                     .setup => {},
                     .connections,
                     .change_team,
@@ -1820,6 +1831,8 @@ pub const Runtime = struct {
                         return null;
                     },
                     .setup => {},
+                    // Only reachable from the Connections screen.
+                    .openrouter_key => unreachable,
                     // Only reachable from the switch screen, never the root.
                     .automatic => unreachable,
                     .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
@@ -2232,10 +2245,19 @@ fn takeDisplayTeam(alloc: Allocator, credential: *credentials.Credential) ?[]u8 
     return team;
 }
 
+/// Credentials the Gateway route can actually use. Subscription and
+/// provider-scoped keys authenticate only their own provider.
+fn isGatewaySource(source: credentials.Source) bool {
+    return switch (source) {
+        .chatgpt_subscription, .grok_subscription, .openrouter_api_key => false,
+        .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key => true,
+    };
+}
+
 fn gatewaySourceCount(sources: SourceSet) usize {
     var count: usize = 0;
     for (credential_source_order) |source| {
-        if (source == .chatgpt_subscription or source == .grok_subscription or !sources.contains(source)) continue;
+        if (!isGatewaySource(source) or !sources.contains(source)) continue;
         count += 1;
     }
     return count;
@@ -2244,7 +2266,7 @@ fn gatewaySourceCount(sources: SourceSet) usize {
 fn gatewaySourceAtIndex(sources: SourceSet, wanted_index: usize) ?credentials.Source {
     var index: usize = 0;
     for (credential_source_order) |source| {
-        if (source == .chatgpt_subscription or source == .grok_subscription or !sources.contains(source)) continue;
+        if (!isGatewaySource(source) or !sources.contains(source)) continue;
         if (index == wanted_index) return source;
         index += 1;
     }
@@ -3185,13 +3207,15 @@ test "auth onboarding picker exposes the setup paths" {
 
     const picker = runtime.pickerView();
     try std.testing.expect(picker.include_skip);
-    try std.testing.expectEqual(@as(usize, 4), picker.choiceCount());
+    try std.testing.expectEqual(@as(usize, 5), picker.choiceCount());
     try std.testing.expect((Choice{ .action = .login }).eql(picker.choiceAt(0).?));
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(picker.choiceAt(1).?));
     try std.testing.expect((Choice{ .action = .grok_login }).eql(picker.choiceAt(2).?));
     try std.testing.expect((Choice{ .action = .setup }).eql(picker.choiceAt(3).?));
     try std.testing.expectEqualStrings("Add an API key", picker.choiceLabel(picker.choiceAt(3).?));
-    try std.testing.expect(picker.choiceAt(4) == null);
+    try std.testing.expect((Choice{ .action = .openrouter_key }).eql(picker.choiceAt(4).?));
+    try std.testing.expectEqualStrings("OpenRouter API key", picker.choiceLabel(picker.choiceAt(4).?));
+    try std.testing.expect(picker.choiceAt(5) == null);
 }
 
 test "clearing a remembered choice re-resolves even when no login was active" {
@@ -3824,4 +3848,67 @@ test "manual code visibility cannot toggle without provider capability" {
     try std.testing.expect(!runtime.toggleSignInCodeEntry());
     try std.testing.expect(!runtime.pickerView().sign_in_code_visible);
     try std.testing.expect(!runtime.signInCodeEntryActive());
+}
+
+test "setup picker offers every provider and reports the OpenRouter key" {
+    const alloc = std.testing.allocator;
+    var runtime: Runtime = .{};
+    runtime.openProviderPicker(alloc, .gateway);
+
+    // Every ProviderId must be reachable from the Model provider screen, or the
+    // provider cannot be selected interactively at all.
+    const provider_view = runtime.pickerView();
+    try std.testing.expectEqual(@as(usize, 4), provider_view.choiceCount());
+    var seen = std.EnumSet(model_provider.ProviderId).initEmpty();
+    var index: usize = 0;
+    while (provider_view.choiceAt(index)) |choice| : (index += 1) {
+        seen.insert(choice.provider);
+    }
+    for (std.meta.tags(model_provider.ProviderId)) |provider| {
+        try std.testing.expect(seen.contains(provider));
+    }
+    try std.testing.expectEqualStrings(
+        "OpenRouter API key",
+        provider_view.choiceLabel(.{ .provider = .openrouter }),
+    );
+
+    // The Connections screen reports whether the key is present in the
+    // environment; it starts no sign-in flow.
+    runtime.openConnectionPicker(alloc);
+    const connections = runtime.pickerView();
+    try std.testing.expect((Choice{ .action = .openrouter_key }).eql(connections.choiceAt(4).?));
+    try std.testing.expectEqualStrings("", connections.choiceDescription(.{ .action = .openrouter_key }));
+
+    var connected: Runtime = .{ .source_inventory = SourceSet.initMany(&.{.openrouter_api_key}) };
+    connected.openConnectionPicker(alloc);
+    try std.testing.expectEqualStrings(
+        "connected",
+        connected.pickerView().choiceDescription(.{ .action = .openrouter_key }),
+    );
+    connected.closePicker(alloc);
+    runtime.closePicker(alloc);
+}
+
+test "provider-scoped credentials never appear as gateway credential choices" {
+    // The Credential source screen picks a credential for the Gateway route, so
+    // subscription and provider-scoped keys must stay out of it even when present.
+    const sources = SourceSet.initMany(&.{
+        .ai_gateway_api_key,
+        .chatgpt_subscription,
+        .grok_subscription,
+        .openrouter_api_key,
+    });
+    try std.testing.expectEqual(@as(usize, 1), gatewaySourceCount(sources));
+    try std.testing.expectEqual(credentials.Source.ai_gateway_api_key, gatewaySourceAtIndex(sources, 0).?);
+    try std.testing.expect(gatewaySourceAtIndex(sources, 1) == null);
+
+    try std.testing.expect(isGatewaySource(.ai_gateway_api_key));
+    try std.testing.expect(!isGatewaySource(.openrouter_api_key));
+
+    // Probing must still know about the key, or Connections could never report it.
+    var found = false;
+    for (credential_source_order) |source| {
+        if (source == .openrouter_api_key) found = true;
+    }
+    try std.testing.expect(found);
 }
