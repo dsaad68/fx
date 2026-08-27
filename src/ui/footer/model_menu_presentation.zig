@@ -340,6 +340,7 @@ fn appendCompactFacts(
     if (capabilities.context_window) |tokens| try appendTokenFact(alloc, facts, tokens, "context");
     if (capabilities.max_output_tokens) |tokens| try appendTokenFact(alloc, facts, tokens, "output");
     if (capabilities.supports_fast_mode) try appendMetadataFact(alloc, facts, "Fast");
+    if (capabilities.is_free) try appendMetadataFact(alloc, facts, "Free");
 }
 
 fn compactFactsWidth(capabilities: model_capabilities.Capabilities) usize {
@@ -355,6 +356,10 @@ fn compactFactsWidth(capabilities: model_capabilities.Capabilities) usize {
     if (capabilities.supports_fast_mode) {
         if (width > 0) width += display_width.visibleWidth(" · ");
         width += display_width.visibleWidth("Fast");
+    }
+    if (capabilities.is_free) {
+        if (width > 0) width += display_width.visibleWidth(" · ");
+        width += display_width.visibleWidth("Free");
     }
     return width;
 }
@@ -418,6 +423,7 @@ fn loadedCatalogStatusText(state: model_cache_runtime.ModelMenuCatalogState) ?[]
             .stored_key => "Gateway catalog: authenticated with the stored API key.",
             .chatgpt_subscription => "Codex catalog: authenticated with a subscription.",
             .grok_subscription => "Grok catalog: authenticated with a subscription.",
+            .openrouter_api_key => "OpenRouter catalog: authenticated with an API key.",
         };
     }
     return null;
@@ -822,4 +828,40 @@ test "model menu keeps only compact facts beside the model" {
     try std.testing.expect(std.mem.find(u8, title.items, "Reasoning") == null);
     try std.testing.expect(std.mem.find(u8, title.items, "Vision") == null);
     try std.testing.expect(std.mem.find(u8, title.items, "Tools") == null);
+}
+
+test "model menu shows a Free fact for zero-cost models" {
+    const alloc = std.testing.allocator;
+
+    var free_row = try composeTitleRow(alloc, .{
+        .id = @constCast("z-ai/glm-5.2:free"),
+        .provider = "z-ai",
+        .capabilities = .{ .context_window = 1_000_000, .is_free = true },
+    }, false, 40, 120);
+    defer free_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, free_row.items, "1M context · Free") != null);
+    try std.testing.expect(std.mem.find(u8, free_row.items, "z-ai/glm-5.2:free") != null);
+
+    var paid_row = try composeTitleRow(alloc, .{
+        .id = @constCast("qwen/qwen3.8-flash"),
+        .provider = "qwen",
+        .capabilities = .{ .context_window = 1_000_000 },
+    }, false, 40, 120);
+    defer paid_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, paid_row.items, "Free") == null);
+}
+
+test "the Free fact is measured so the facts column stays aligned" {
+    const paid = compactFactsWidth(.{ .context_window = 1_000_000 });
+    const free = compactFactsWidth(.{ .context_window = 1_000_000, .is_free = true });
+    // " · Free" is seven display columns wider.
+    try std.testing.expectEqual(paid + 7, free);
+
+    // A terminal too narrow for the facts column drops it entirely rather than
+    // overflowing the row.
+    try std.testing.expect(modelFactsColumn(.{
+        .items = &.{},
+        .load_state = .ready,
+        .catalog_state = .{},
+    }, 10) == null);
 }

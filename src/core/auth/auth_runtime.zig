@@ -1596,7 +1596,18 @@ pub const Runtime = struct {
                     self,
                     loadRuntimeCredentialSource,
                 ),
-            .gateway => if (self.credentialSource() != .chatgpt_subscription and self.credentialSource() != .grok_subscription)
+            .openrouter => if (self.credentialSource() == .openrouter_api_key)
+                false
+            else
+                self.selectSourceWithLoader(
+                    alloc,
+                    .openrouter_api_key,
+                    self,
+                    loadRuntimeCredentialSource,
+                ),
+            .gateway => if (self.credentialSource() != .chatgpt_subscription and
+                self.credentialSource() != .grok_subscription and
+                self.credentialSource() != .openrouter_api_key)
                 false
             else
                 @as(?bool, try self.reselectByPrecedenceWithDeps(

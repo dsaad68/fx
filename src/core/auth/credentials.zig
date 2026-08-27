@@ -44,6 +44,7 @@ pub const CatalogAuthenticatedSource = enum {
     stored_key,
     chatgpt_subscription,
     grok_subscription,
+    openrouter_api_key,
 
     fn credentialSource(self: CatalogAuthenticatedSource) Source {
         return switch (self) {
@@ -53,6 +54,7 @@ pub const CatalogAuthenticatedSource = enum {
             .stored_key => .stored_key,
             .chatgpt_subscription => .chatgpt_subscription,
             .grok_subscription => .grok_subscription,
+            .openrouter_api_key => .openrouter_api_key,
         };
     }
 };
@@ -168,6 +170,7 @@ pub fn catalogAccessForCredentialAndAccount(
         .stored_key => .stored_key,
         .chatgpt_subscription => .chatgpt_subscription,
         .grok_subscription => .grok_subscription,
+        .openrouter_api_key => .openrouter_api_key,
         .fx_login => blk: {
             const team = team_context orelse
                 return .{ .public_only = .fx_login_team_required };
@@ -180,7 +183,9 @@ pub fn catalogAccessForCredentialAndAccount(
         .authenticated = .{
             .source = authenticated_source,
             .credential = credential,
-            .team_context = if (authenticated_source == .chatgpt_subscription or authenticated_source == .grok_subscription) null else team_context,
+            .team_context = if (authenticated_source == .chatgpt_subscription or
+                authenticated_source == .grok_subscription or
+                authenticated_source == .openrouter_api_key) null else team_context,
             .account_id = if (authenticated_source == .grok_subscription) account_id else null,
         },
     };
@@ -195,6 +200,10 @@ pub const stored_key_backend_label = if (builtin.os.tag == .macos) "macOS Keycha
 pub const LoadMode = enum { stored, refresh_if_needed };
 
 const FxLoginRefreshMode = enum { if_needed, force };
+
+/// OpenRouter authenticates with a plain API key supplied through the
+/// environment, so it needs no OAuth session or stored-key slot of its own.
+pub const openrouter_api_key_env = "OPENROUTER_API_KEY";
 
 pub const missing_credential_message = "fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.";
 pub const missing_interactive_credential_message = "fx needs access to Vercel AI Gateway. Run /login to sign in, /setup to use an API key, or set AI_GATEWAY_API_KEY.";
@@ -297,6 +306,10 @@ pub fn resolveForProvider(
             };
             return .{ .credential = credential };
         },
+        .openrouter => {
+            const credential = try loadEnvCredential(alloc, openrouter_api_key_env, .openrouter_api_key);
+            return .{ .credential = credential };
+        },
         .gateway => {},
     }
     return resolvePreferring(
@@ -304,7 +317,9 @@ pub fn resolveForProvider(
         transport,
         secret_store,
         mode,
-        if (preferred == .chatgpt_subscription or preferred == .grok_subscription) null else preferred,
+        if (preferred == .chatgpt_subscription or
+            preferred == .grok_subscription or
+            preferred == .openrouter_api_key) null else preferred,
     );
 }
 
@@ -411,6 +426,7 @@ pub fn loadSource(
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
+        .openrouter_api_key => loadEnvCredential(alloc, openrouter_api_key_env, source),
     };
 }
 
@@ -422,6 +438,7 @@ pub fn sourceExists(
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
         .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
+        .openrouter_api_key => nonEmptyEnvValue(openrouter_api_key_env) != null,
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -662,6 +679,7 @@ pub fn sourceLabel(source: Source) []const u8 {
         .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
         .chatgpt_subscription => "Codex subscription",
         .grok_subscription => "Grok subscription",
+        .openrouter_api_key => openrouter_api_key_env,
     };
 }
 
