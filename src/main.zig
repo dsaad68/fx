@@ -1751,6 +1751,7 @@ const App = struct {
             providers.gateway.permission_reviewer = null;
             providers.codex.permission_reviewer = null;
             providers.grok.permission_reviewer = null;
+            providers.openrouter.permission_reviewer = null;
         }
         return providers;
     }

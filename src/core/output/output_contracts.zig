@@ -377,6 +377,10 @@ fn grokProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
     return auth.grok_connected or auth.active_source == .grok_subscription;
 }
 
+fn openRouterProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    return auth.openrouter_connected or auth.active_source == .openrouter_api_key;
+}
+
 fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.StatusSnapshot) !void {
     var wrote_provider = false;
     if (gatewayProviderConnected(auth)) {
@@ -391,6 +395,11 @@ fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.Status
     if (grokProviderConnected(auth)) {
         if (wrote_provider) try writer.writeAll(", Grok");
         if (!wrote_provider) try writer.writeAll("Grok");
+        wrote_provider = true;
+    }
+    if (openRouterProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", OpenRouter");
+        if (!wrote_provider) try writer.writeAll("OpenRouter");
         wrote_provider = true;
     }
     if (!wrote_provider) try writer.writeAll("none");
@@ -624,6 +633,11 @@ pub const StatusSnapshot = struct {
             if (grokProviderConnected(self.auth)) {
                 if (wrote_provider) try writer.writeByte(',');
                 try std.json.Stringify.value("grok", .{}, writer);
+                wrote_provider = true;
+            }
+            if (openRouterProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("openrouter", .{}, writer);
             }
             try writer.writeByte(']');
         }

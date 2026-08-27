@@ -383,6 +383,15 @@ fn formatTokenFact(buf: *[48]u8, tokens: u32, suffix: []const u8) ![]const u8 {
     if (tokens >= 1_000 and tokens % 1_000 == 0) {
         return try std.fmt.bufPrint(buf, "{d}K {s}", .{ tokens / 1_000, suffix });
     }
+    // Context windows are not always round decimals: a power-of-two window such
+    // as 1048576 would otherwise print in full and crowd out the rest of the
+    // column, so it rounds to the nearest unit instead.
+    if (tokens >= 1_000_000) {
+        return try std.fmt.bufPrint(buf, "{d}M {s}", .{ (tokens + 500_000) / 1_000_000, suffix });
+    }
+    if (tokens >= 1_000) {
+        return try std.fmt.bufPrint(buf, "{d}K {s}", .{ (tokens + 500) / 1_000, suffix });
+    }
     return try std.fmt.bufPrint(buf, "{d} {s}", .{ tokens, suffix });
 }
 
@@ -864,4 +873,17 @@ test "the Free fact is measured so the facts column stays aligned" {
         .load_state = .ready,
         .catalog_state = .{},
     }, 10) == null);
+}
+
+test "token facts abbreviate windows that are not round decimals" {
+    var buf: [48]u8 = undefined;
+    // Exact multiples keep their existing rendering.
+    try std.testing.expectEqualStrings("1M context", try formatTokenFact(&buf, 1_000_000, "context"));
+    try std.testing.expectEqualStrings("128K output", try formatTokenFact(&buf, 128_000, "output"));
+    // Real OpenRouter windows are powers of two and must not print in full.
+    try std.testing.expectEqualStrings("1M context", try formatTokenFact(&buf, 1_048_576, "context"));
+    try std.testing.expectEqualStrings("230K output", try formatTokenFact(&buf, 230_400, "output"));
+    try std.testing.expectEqualStrings("262K context", try formatTokenFact(&buf, 262_144, "context"));
+    // Small values stay exact.
+    try std.testing.expectEqualStrings("512 output", try formatTokenFact(&buf, 512, "output"));
 }
