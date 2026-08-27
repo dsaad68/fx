@@ -91,13 +91,13 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .login,
         .token = "login",
-        .usage = "login [vercel|codex|grok]",
+        .usage = "login [vercel|codex|grok|openrouter]",
         .summary = "Sign in to Vercel or a selected provider",
     },
     .{
         .kind = .logout,
         .token = "logout",
-        .usage = "logout [vercel|codex|grok]",
+        .usage = "logout [vercel|codex|grok|openrouter]",
         .summary = "Sign out of Vercel or a selected provider session",
     },
     .{
@@ -153,14 +153,17 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .models,
         .token = "models",
-        .usage = "models [--json]",
+        .usage = "models [--json] [--free]",
         .summary = "List available models",
-        .options = &.{json_option},
+        .options = &.{
+            json_option,
+            .{ .flag = "--free", .description = "List only models that cost nothing to run" },
+        },
     },
     .{
         .kind = .provider,
         .token = "provider",
-        .usage = "provider <gateway|codex|grok>",
+        .usage = "provider <gateway|codex|grok|openrouter>",
         .summary = "Choose the model provider used by fx",
     },
     .{
@@ -299,9 +302,9 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .usage = "session recover <id>", .summary = "Copy a recoverable corrupt session" },
     } },
     .{ .entries = &.{
-        .{ .kind = .login, .usage = "login [vercel|codex|grok]", .summary = "Sign in to a model provider" },
-        .{ .kind = .logout, .usage = "logout [vercel|codex|grok]", .summary = "Sign out of a model provider" },
-        .{ .kind = .provider, .usage = "provider <gateway|codex|grok>", .summary = "Choose the active model provider" },
+        .{ .kind = .login, .usage = "login [vercel|codex|grok|openrouter]", .summary = "Sign in to a model provider" },
+        .{ .kind = .logout, .usage = "logout [vercel|codex|grok|openrouter]", .summary = "Sign out of a model provider" },
+        .{ .kind = .provider, .usage = "provider <gateway|codex|grok|openrouter>", .summary = "Choose the active model provider" },
         .{ .kind = .models, .usage = "models" },
     } },
     .{ .entries = &.{
