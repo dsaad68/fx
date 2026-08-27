@@ -240,6 +240,29 @@ pub const missing_chatgpt_credential_message = "fx needs a Codex subscription lo
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login, open Connections, then choose Codex subscription.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
 pub const missing_grok_interactive_credential_message = "Grok needs a subscription login. Run /login, open Connections, then choose Grok subscription.";
+pub const missing_openrouter_credential_message = "fx needs an OpenRouter API key for this model. Set " ++ openrouter_api_key_env ++ ".";
+pub const missing_openrouter_interactive_credential_message = "OpenRouter needs an API key. Set " ++ openrouter_api_key_env ++ " in your environment, then restart fx.";
+
+/// Guidance for a provider whose credential is missing. A switch rather than a
+/// fall-through chain, so a new provider cannot silently inherit the Gateway
+/// message and tell the user to run `fx login`.
+pub fn missingCredentialMessage(provider: model_provider.ProviderId) []const u8 {
+    return switch (provider) {
+        .gateway => missing_credential_message,
+        .codex => missing_chatgpt_credential_message,
+        .grok => missing_grok_credential_message,
+        .openrouter => missing_openrouter_credential_message,
+    };
+}
+
+pub fn missingInteractiveCredentialMessage(provider: model_provider.ProviderId) []const u8 {
+    return switch (provider) {
+        .gateway => missing_interactive_credential_message,
+        .codex => missing_chatgpt_interactive_credential_message,
+        .grok => missing_grok_interactive_credential_message,
+        .openrouter => missing_openrouter_interactive_credential_message,
+    };
+}
 pub const unreadable_store_message = "fx could not read the stored API key from " ++ stored_key_backend_label ++ ". A key may be saved but unreadable. Set FX_TRACE_LOG for the failing step, or set AI_GATEWAY_API_KEY.";
 
 test "public credential guidance spells fx lowercase" {

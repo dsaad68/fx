@@ -85,12 +85,7 @@ pub fn Runtime(comptime App: type) type {
                     try app.writeDomainNotice(.{
                         .topic = "auth",
                         .tone = .warning,
-                        .body = if (provider == .grok)
-                            credentials.missing_grok_interactive_credential_message
-                        else if (provider == .codex)
-                            credentials.missing_chatgpt_interactive_credential_message
-                        else
-                            credentials.missing_interactive_credential_message,
+                        .body = credentials.missingInteractiveCredentialMessage(provider),
                     }, true);
                     app.shell.render_requests.request(.footer);
                     return false;
