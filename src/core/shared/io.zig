@@ -487,8 +487,10 @@ pub fn nanoTimestamp() i128 {
 pub fn writeFileAtomic(alloc: std.mem.Allocator, path: []const u8, text: []const u8) !void {
     e2eFailIfDurableMutationAttempted();
     const maybe_existing_permissions = existingFilePermissions(path);
-    if (maybe_existing_permissions) |existing_permissions| {
-        if (existing_permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+    if (host_enforces_private_state) {
+        if (maybe_existing_permissions) |existing_permissions| {
+            if (existing_permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+        }
     }
     const permissions = maybe_existing_permissions orelse .default_file;
     const temp_path = try std.fmt.allocPrint(alloc, "{s}.tmp.{d}", .{ path, nanoTimestamp() });
@@ -506,6 +508,21 @@ pub fn writeFileAtomic(alloc: std.mem.Allocator, path: []const u8, text: []const
 
     try std.Io.Dir.renameAbsolute(temp_path, path, getIo());
     cleanup_temp = false;
+}
+
+/// WASI has no POSIX permission bits, and a WebAssembly instance is the only
+/// writer of the filesystem its host preopened for it. Private state is scoped
+/// by the host there, so enforcing modes and advisory locks protects nothing
+/// and fails every durable write instead.
+/// A variable rather than a constant on purpose: folding it at compile time
+/// would drop `PrivateStatePermissionsUnsupported` out of the inferred error
+/// sets below, which callers on every target still switch on. Nothing mutates
+/// it outside of tests.
+var host_enforces_private_state: bool = builtin.os.tag != .wasi;
+
+/// Whether the host has POSIX permission bits worth enforcing.
+pub fn hostEnforcesPrivateState() bool {
+    return host_enforces_private_state;
 }
 
 const private_dir_permissions = std.Io.File.Permissions.fromMode(0o700);
@@ -573,13 +590,17 @@ fn validateRelativeLeaf(name: []const u8) !void {
 fn verifyPrivateRegularFile(file: std.Io.File) !void {
     const stat = try file.stat(getIo());
     if (stat.kind != .file or stat.nlink != 1) return error.DurablePathUnsafe;
-    if (stat.permissions.toMode() & 0o777 != 0o600) return error.PrivateStatePermissionsUnsupported;
+    if (host_enforces_private_state) {
+        if (stat.permissions.toMode() & 0o777 != 0o600) return error.PrivateStatePermissionsUnsupported;
+    }
 }
 
 fn verifyPrivateDirectory(dir: std.Io.Dir) !void {
     const stat = try dir.stat(getIo());
     if (stat.kind != .directory) return error.DurablePathUnsafe;
-    if (stat.permissions.toMode() & 0o777 != 0o700) return error.PrivateStatePermissionsUnsupported;
+    if (host_enforces_private_state) {
+        if (stat.permissions.toMode() & 0o777 != 0o700) return error.PrivateStatePermissionsUnsupported;
+    }
 }
 
 /// The handle must come from an `openDir` that requested iteration. Linux returns an
@@ -626,7 +647,9 @@ fn openOrCreateVerifiedPrivateChild(parent: std.Io.Dir, name: []const u8) !Verif
     };
     errdefer dir.close(zio);
 
-    dir.setPermissions(zio, private_dir_permissions) catch return error.PrivateStatePermissionsUnsupported;
+    if (host_enforces_private_state) {
+        dir.setPermissions(zio, private_dir_permissions) catch return error.PrivateStatePermissionsUnsupported;
+    }
     try verifyPrivateDirectory(dir);
     if (created) try syncVerifiedDir(parent);
     return .{ .dir = dir };
@@ -647,7 +670,9 @@ fn validateReplaceTarget(dir: std.Io.Dir, name: []const u8) !void {
         else => return err,
     };
     if (stat.kind != .file or stat.nlink != 1) return error.DurablePathUnsafe;
-    if (stat.permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+    if (host_enforces_private_state) {
+        if (stat.permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+    }
 }
 
 fn cleanupVerifiedTemp(dir: std.Io.Dir, name: []const u8) void {
@@ -698,7 +723,9 @@ pub fn durableReplaceVerifiedWithOps(
     temp_exists = true;
     defer file.close(getIo());
 
-    file.setPermissions(getIo(), private_file_permissions) catch return error.PrivateStatePermissionsUnsupported;
+    if (host_enforces_private_state) {
+        file.setPermissions(getIo(), private_file_permissions) catch return error.PrivateStatePermissionsUnsupported;
+    }
     verifyPrivateRegularFile(file) catch |err| switch (err) {
         error.DurablePathUnsafe, error.PrivateStatePermissionsUnsupported => return err,
         else => return error.DurableReplacePreRenameFailed,
@@ -711,10 +738,9 @@ pub fn durableReplaceVerifiedWithOps(
     const final_stat = dir.dir.statFile(getIo(), name, .{ .follow_symlinks = false }) catch {
         return error.DurableReplacePostRenameFailed;
     };
-    if (final_stat.kind != .file or final_stat.nlink != 1 or
-        final_stat.permissions.toMode() & 0o777 != 0o600)
-    {
-        return error.DurableReplacePostRenameFailed;
+    if (final_stat.kind != .file or final_stat.nlink != 1) return error.DurableReplacePostRenameFailed;
+    if (host_enforces_private_state) {
+        if (final_stat.permissions.toMode() & 0o777 != 0o600) return error.DurableReplacePostRenameFailed;
     }
     ops.sync_dir(ops.ctx, dir.dir) catch return error.DurableReplacePostRenameFailed;
 }
@@ -745,10 +771,12 @@ fn openOrCreatePrivateLockFile(dir: *VerifiedDir, name: []const u8) !std.Io.File
                 }),
                 else => return create_err,
             };
-            created.setPermissions(zio, private_file_permissions) catch {
-                created.close(zio);
-                return error.PrivateStatePermissionsUnsupported;
-            };
+            if (host_enforces_private_state) {
+                created.setPermissions(zio, private_file_permissions) catch {
+                    created.close(zio);
+                    return error.PrivateStatePermissionsUnsupported;
+                };
+            }
             syncVerifiedDir(dir.dir) catch {
                 created.close(zio);
                 return error.DirectorySyncFailed;
@@ -828,7 +856,10 @@ fn acquireTimedAdvisoryLockControlled(
             if (flag.load(.acquire)) return error.Cancelled;
         }
         const locked = ops.try_lock(ops.ctx, file) catch |err| switch (err) {
-            error.FileLocksUnsupported => return error.LockUnsupported,
+            error.FileLocksUnsupported => if (host_enforces_private_state)
+                return error.LockUnsupported
+            else
+                true,
             else => return err,
         };
         if (locked) return .{ .file = file };
@@ -844,8 +875,10 @@ pub fn copyFileAtomic(alloc: std.mem.Allocator, source_path: []const u8, dest_pa
 
     const stat = try source.stat(zio);
     if (stat.kind != .file) return error.NotRegularFile;
-    if (existingFilePermissions(dest_path)) |existing_permissions| {
-        if (existing_permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+    if (host_enforces_private_state) {
+        if (existingFilePermissions(dest_path)) |existing_permissions| {
+            if (existing_permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+        }
     }
 
     const temp_path = try std.fmt.allocPrint(alloc, "{s}.tmp.{d}", .{ dest_path, nanoTimestamp() });

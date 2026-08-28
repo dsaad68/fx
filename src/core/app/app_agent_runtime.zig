@@ -852,9 +852,14 @@ pub fn Runtime(comptime App: type) type {
             app.context_snapshot.deinit(app.alloc);
             if (!app.context_enabled) return;
 
+            const host_workspace = appHostWorkspaceInfo(app);
+            const workspace_root = if (host_workspace) |info| info.root() else app.workspace_root;
             app.context_snapshot = app.contextRegistry().gatherDefaultSnapshot(app.alloc, .{
-                .workspace_root = app.workspace_root,
-                .access_scope = appAccessScope(app),
+                .workspace_root = workspace_root,
+                .access_scope = if (host_workspace != null)
+                    workspace_access.AccessScope.primaryOnly(workspace_root)
+                else
+                    appAccessScope(app),
                 .targets = targets,
                 .context_limits = if (comptime @hasField(App, "context_limits")) app.context_limits else .{},
             }) catch |err| {

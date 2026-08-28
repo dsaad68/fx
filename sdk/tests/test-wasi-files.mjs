@@ -119,11 +119,18 @@ const term = await createFxTerminal({
 const timer = setTimeout(() => { failures.push("fx terminal never became interactive"); }, 10000);
 await Promise.race([term.interactive, new Promise((resolve) => setTimeout(resolve, 10000))]);
 clearTimeout(timer);
+// A durable write is the path that POSIX permission enforcement used to break:
+// WebAssembly has no chmod, so every private-state write failed before it began.
+term.write("/mcp add sdk-probe https://mcp.example/sdk\r");
+await new Promise((resolve) => setTimeout(resolve, 2000));
 term.write("read the project instructions\r");
 await new Promise((resolve) => setTimeout(resolve, 2000));
 term.abort();
 check("fx resolved the home config", opened.includes("/home/user/.fx/settings.json"), true);
 check("fx looked for project instructions", opened.includes("/AGENTS.md"), true);
+const savedMcp = seeded.read("/home/user/.fx/mcp.json");
+check("fx saved the MCP config", savedMcp ? new TextDecoder().decode(savedMcp).includes("sdk-probe") : null, true);
+check("fx cleaned up its temporary files", Object.keys(seeded.snapshot()).some((path) => path.includes(".tmp.")), false);
 
 if (failures.length) {
   console.error(`FAIL\n${failures.map((line) => `  ${line}`).join("\n")}`);
