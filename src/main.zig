@@ -2077,7 +2077,7 @@ const App = struct {
         if (comptime host_target.is_wasm) {
             try messages.append(arena, .{
                 .role = .system,
-                .content = browser_capabilities.model_context,
+                .content = browser_capabilities.modelContextForEnv(io_mod.getenv("FX_BROWSER_NETWORK")),
             });
         }
     }
