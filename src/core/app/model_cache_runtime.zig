@@ -108,6 +108,11 @@ pub const ModelProviderFilter = enum {
     openai,
     xai,
     zai,
+    /// Models the host serves itself rather than fetching — a WebAssembly
+    /// embedder running one in the page, or a server on loopback. They are
+    /// nobody's hosted catalog, so grouping them under Others would bury the
+    /// one model on the machine among several hundred that are not.
+    local,
     others,
 };
 
@@ -268,6 +273,8 @@ fn providerFilter(provider: []const u8) ModelProviderFilter {
         .xai
     else if (std.ascii.eqlIgnoreCase(provider, "zai"))
         .zai
+    else if (std.ascii.eqlIgnoreCase(provider, "local"))
+        .local
     else
         .others;
 }
@@ -1398,6 +1405,32 @@ test "model menu owns resolved catalog state and filters without changing catalo
     const selected = (try runtime.menu.selectedModelAlloc(alloc)).?;
     defer alloc.free(selected);
     try std.testing.expectEqualStrings("standalone", selected);
+}
+
+test "a host-served model gets its own provider tab" {
+    const alloc = std.testing.allocator;
+    // The catalog a WebAssembly embedder serves: its own model alongside the
+    // hosted ones. Without the local filter the single model on this machine
+    // sits in Others with several hundred that are not.
+    const entries = [_]model_catalog.ModelCatalogEntry{
+        .{ .id = @constCast("local/lfm2.5-2.6b-onnx"), .model_type = @constCast("language") },
+        .{ .id = @constCast("openai/gpt-5"), .model_type = @constCast("language") },
+    };
+    var menu: ModelMenu = .{};
+    defer menu.deinit(alloc);
+    try hydrateMenuSnapshot(alloc, &menu, &entries);
+    menu.active = true;
+
+    try std.testing.expectEqual(ModelProviderFilter.local, providerFilter("local"));
+    try std.testing.expect(modelProviderFilterAvailable(menu.items.items, .local));
+
+    // Reachable by cycling, which is the only way the tab can be selected.
+    var reached = false;
+    for (0..model_provider_filter_count) |_| {
+        _ = menu.moveProvider(1);
+        if (menu.providerFilter() == .local) reached = true;
+    }
+    try std.testing.expect(reached);
 }
 
 test "model menu provider navigation skips absent and redundant filters" {

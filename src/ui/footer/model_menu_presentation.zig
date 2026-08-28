@@ -260,6 +260,7 @@ fn providerTabLabel(index: usize) []const u8 {
         .openai => "OpenAI",
         .xai => "xAI",
         .zai => "Z.AI",
+        .local => "Local",
         .others => "Others",
     };
 }
@@ -532,7 +533,8 @@ test "model menu keeps active provider visible and omits unknown metadata" {
         .active = true,
         .load_state = .ready,
         .items = &items,
-        .provider_index = 5,
+        // Others, which the local tab pushed one along.
+        .provider_index = 6,
     };
 
     const rows = menuRowCount(projection, 42, 5);
