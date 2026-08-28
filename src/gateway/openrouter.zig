@@ -10,6 +10,11 @@ const Allocator = std.mem.Allocator;
 
 const endpoint = "https://openrouter.ai/api/v1/chat/completions";
 const e2e_endpoint_env = "FX_E2E_OPENROUTER_CHAT_URL";
+/// The same redirection, under a name a host can rely on. A WebAssembly
+/// embedder that answers the chat protocol itself — a model running in the
+/// page, or llama.cpp on the next port — is not running an end-to-end test,
+/// and should not have to set a variable that says it is.
+const local_endpoint_env = "FX_OPENROUTER_CHAT_URL";
 
 /// OpenRouter ranks calling applications by these attribution headers.
 const referer_header = "https://github.com/vercel-labs/fx";
@@ -29,10 +34,17 @@ pub const agent_stream_provider = stream_provider.Provider{
     .stream_fn = streamCompletion,
 };
 
-/// The chat endpoint, honouring the loopback-only end-to-end override. Exposed
-/// so alternate transports (the WebAssembly host) target the same URL.
+/// Whichever override is set, before it has been judged. Loopback http is the
+/// whole of the trust boundary here: an environment variable must never be
+/// able to point a conversation at a host of its choosing.
+fn endpointOverride() ?[]const u8 {
+    return io_mod.getenv(local_endpoint_env) orelse io_mod.getenv(e2e_endpoint_env);
+}
+
+/// The chat endpoint, honouring the loopback-only override. Exposed so
+/// alternate transports (the WebAssembly host) target the same URL.
 pub fn chatUrl() []const u8 {
-    if (io_mod.getenv(e2e_endpoint_env)) |override| {
+    if (endpointOverride()) |override| {
         if (gateway_client.isLoopbackHttpUrl(override)) return override;
     }
     return endpoint;
@@ -209,7 +221,7 @@ pub fn streamPrepared(
     const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.credential.secret});
     defer secret.zeroAndFree(alloc, auth_header);
 
-    const request_endpoint = if (io_mod.getenv(e2e_endpoint_env)) |override| endpoint: {
+    const request_endpoint = if (endpointOverride()) |override| endpoint: {
         if (!gateway_client.isLoopbackHttpUrl(override)) return error.InvalidE2EOpenRouterEndpoint;
         break :endpoint override;
     } else endpoint;
@@ -873,4 +885,56 @@ test "OpenRouter refuses a non-loopback e2e endpoint override" {
     // redirect live traffic to an arbitrary host.
     try testing.expect(!gateway_client.isLoopbackHttpUrl("https://evil.example/api/v1/chat/completions"));
     try testing.expect(gateway_client.isLoopbackHttpUrl("http://127.0.0.1:8080/api/v1/chat/completions"));
+}
+
+/// Installs exactly `entries` as the environment, so a variable left set in the
+/// shell running the tests cannot decide the outcome.
+const EndpointTestEnv = struct {
+    map: std.process.Environ.Map,
+
+    fn install(entries: []const [2][]const u8) !EndpointTestEnv {
+        var self: EndpointTestEnv = .{ .map = std.process.Environ.Map.init(testing.allocator) };
+        errdefer self.map.deinit();
+        for (entries) |entry| try self.map.put(entry[0], entry[1]);
+        io_mod.setEnvironMap(&self.map);
+        return self;
+    }
+
+    fn deinit(self: *EndpointTestEnv) void {
+        io_mod.setEnvironMap(&empty_test_environ);
+        self.map.deinit();
+    }
+};
+
+var empty_test_environ: std.process.Environ.Map = .init(std.heap.page_allocator);
+
+test "OpenRouter chat URL follows the host override" {
+    var env = try EndpointTestEnv.install(&.{
+        .{ "FX_OPENROUTER_CHAT_URL", "http://127.0.0.1:8000/v1/chat/completions" },
+    });
+    defer env.deinit();
+
+    try testing.expectEqualStrings("http://127.0.0.1:8000/v1/chat/completions", chatUrl());
+}
+
+test "OpenRouter chat URL prefers the host override over the e2e name" {
+    var env = try EndpointTestEnv.install(&.{
+        .{ "FX_OPENROUTER_CHAT_URL", "http://localhost:8000/v1/chat/completions" },
+        .{ "FX_E2E_OPENROUTER_CHAT_URL", "http://localhost:9999/v1/chat/completions" },
+    });
+    defer env.deinit();
+
+    try testing.expectEqualStrings("http://localhost:8000/v1/chat/completions", chatUrl());
+}
+
+test "OpenRouter chat URL ignores a host override that leaves the machine" {
+    // The new name carries the same trust boundary as the old one: anything
+    // that is not loopback http falls back to OpenRouter itself rather than
+    // sending the conversation where the variable asked.
+    var env = try EndpointTestEnv.install(&.{
+        .{ "FX_OPENROUTER_CHAT_URL", "https://evil.example/v1/chat/completions" },
+    });
+    defer env.deinit();
+
+    try testing.expectEqualStrings(endpoint, chatUrl());
 }

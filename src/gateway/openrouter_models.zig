@@ -14,6 +14,10 @@ const gateway_client = @import("client.zig");
 /// the source means every listed model can actually run.
 const default_models_endpoint = "https://openrouter.ai/api/v1/models?supported_parameters=tools";
 const e2e_models_endpoint_env = "FX_E2E_OPENROUTER_MODELS_URL";
+/// The catalog half of `FX_OPENROUTER_CHAT_URL`: a host serving the chat
+/// protocol serves the model list too, and would otherwise be offered
+/// OpenRouter's several hundred models for a machine that holds one.
+const local_models_endpoint_env = "FX_OPENROUTER_MODELS_URL";
 
 const max_catalog_models: usize = 2048;
 const max_model_id_bytes: usize = 256;
@@ -100,10 +104,16 @@ fn fetchCatalogForProvider(
     return .{ .catalog = catalog };
 }
 
-/// The catalog endpoint, honouring the loopback-only end-to-end override.
-/// Exposed so alternate transports (the WebAssembly host) target the same URL.
+/// Whichever override is set, before it has been judged — see the note on the
+/// chat endpoint's equivalent.
+fn endpointOverride() ?[]const u8 {
+    return io_mod.getenv(local_models_endpoint_env) orelse io_mod.getenv(e2e_models_endpoint_env);
+}
+
+/// The catalog endpoint, honouring the loopback-only override. Exposed so
+/// alternate transports (the WebAssembly host) target the same URL.
 pub fn modelsEndpoint() []const u8 {
-    if (io_mod.getenv(e2e_models_endpoint_env)) |override| {
+    if (endpointOverride()) |override| {
         if (gateway_client.isLoopbackHttpUrl(override)) return override;
     }
     return default_models_endpoint;
@@ -116,7 +126,7 @@ fn catalogFetchFailure(err: anyerror) model_catalog.Failure {
 }
 
 fn modelsUrl(alloc: std.mem.Allocator) ![]u8 {
-    const override = io_mod.getenv(e2e_models_endpoint_env);
+    const override = endpointOverride();
     if (override) |url| {
         if (!gateway_client.isLoopbackHttpUrl(url)) return error.InvalidE2EOpenRouterModelsEndpoint;
         return alloc.dupe(u8, url);
@@ -523,4 +533,49 @@ test "OpenRouter models endpoint override is restricted to loopback" {
     try testing.expect(std.mem.indexOf(u8, default_models_endpoint, "supported_parameters=tools") != null);
     try testing.expect(!gateway_client.isLoopbackHttpUrl("https://evil.example/api/v1/models"));
     try testing.expect(gateway_client.isLoopbackHttpUrl("http://127.0.0.1:9/api/v1/models"));
+}
+
+/// Installs exactly `entries` as the environment — see the equivalent in
+/// openrouter.zig.
+const EndpointTestEnv = struct {
+    map: std.process.Environ.Map,
+
+    fn install(entries: []const [2][]const u8) !EndpointTestEnv {
+        var self: EndpointTestEnv = .{ .map = std.process.Environ.Map.init(testing.allocator) };
+        errdefer self.map.deinit();
+        for (entries) |entry| try self.map.put(entry[0], entry[1]);
+        io_mod.setEnvironMap(&self.map);
+        return self;
+    }
+
+    fn deinit(self: *EndpointTestEnv) void {
+        io_mod.setEnvironMap(&empty_test_environ);
+        self.map.deinit();
+    }
+};
+
+var empty_test_environ: std.process.Environ.Map = .init(std.heap.page_allocator);
+
+test "OpenRouter catalog follows the host override, loopback only" {
+    {
+        var env = try EndpointTestEnv.install(&.{
+            .{ "FX_OPENROUTER_MODELS_URL", "http://127.0.0.1:8000/v1/models" },
+        });
+        defer env.deinit();
+        try testing.expectEqualStrings("http://127.0.0.1:8000/v1/models", modelsEndpoint());
+
+        // A host serving one model should not be asked to serve OpenRouter's
+        // catalog, so the URL builder agrees with the resolver.
+        const url = try modelsUrl(testing.allocator);
+        defer testing.allocator.free(url);
+        try testing.expectEqualStrings("http://127.0.0.1:8000/v1/models", url);
+    }
+    {
+        var env = try EndpointTestEnv.install(&.{
+            .{ "FX_OPENROUTER_MODELS_URL", "https://evil.example/v1/models" },
+        });
+        defer env.deinit();
+        try testing.expectEqualStrings(default_models_endpoint, modelsEndpoint());
+        try testing.expectError(error.InvalidE2EOpenRouterModelsEndpoint, modelsUrl(testing.allocator));
+    }
 }
