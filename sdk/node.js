@@ -6,13 +6,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createFxAgent as createWasmAgent,
   createFxTerminal as createWasmTerminal,
+  createMemoryFileSystem,
   encodeXtermKeyEvent,
   fxSdkApiVersion,
   supportsJspi,
   xtermAdapter,
 } from "./fx-sdk.js";
 
-export { encodeXtermKeyEvent, fxSdkApiVersion, supportsJspi, xtermAdapter };
+export { createMemoryFileSystem, encodeXtermKeyEvent, fxSdkApiVersion, supportsJspi, xtermAdapter };
 export const libfxApiVersion = 2;
 
 const fetchOperationStale = 0;

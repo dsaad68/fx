@@ -286,6 +286,49 @@ Hosts may provide adapters for runtime state and external effects:
 | `promptHistoryStore` | Stores terminal prompt history |
 | `openUrl` | Opens authentication and verification URLs |
 | `workspace` | Provides the constrained browser workspace adapter |
+| `fs` | Backs the WebAssembly filesystem so fx can resolve real paths |
+| `files` | Seeds an in-memory filesystem instead of writing an `fs` adapter |
+
+### Filesystem
+
+The WebAssembly runtime has no filesystem of its own. Without `fs` or `files`
+it reports an empty preopen table, so every absolute path fx tries — including
+`$HOME/.fx/settings.json` — fails to resolve. Passing either option installs a
+single preopen at `/` and routes the WASI file calls to the host.
+
+```js
+import { createFxTerminal, createMemoryFileSystem } from "libfx/browser";
+
+const files = createMemoryFileSystem({
+  "/home/user/.fx/settings.json": JSON.stringify({ model: "openai/gpt-5" }),
+});
+
+await createFxTerminal({ terminal, files: { "/home/user/AGENTS.md": "# Notes\n" } });
+await createFxTerminal({ terminal, fs: files, env: { HOME: "/home/user" } });
+```
+
+`createMemoryFileSystem(seed?)` returns a ready adapter and adds `snapshot()`
+for reading the result back. A host that already owns a filesystem — an
+in-browser shell, an OPFS tree, a remote volume — should implement the adapter
+instead. Every method may return a promise:
+
+| Method | Contract |
+| --- | --- |
+| `stat(path)` | `{ type: "file" \| "dir", size?, mtimeMs? }`, or `null` when absent |
+| `read(path)` | File contents as a string or `Uint8Array`, or `null` |
+| `write(path, bytes)` | Replaces file contents; required for writes |
+| `list(path)` | `[{ name, type }]` or names, or `null` when the path is not a directory |
+| `mkdir(path)` | Creates one directory |
+| `remove(path)` | Removes one file |
+| `rmdir(path)` | Removes one empty directory |
+| `rename(from, to)` | Moves a file or directory |
+| `root` | Optional preopen path; paths outside it are refused |
+
+Only `stat` and `read` are required. A missing method reports `ENOSYS` to fx
+rather than failing the call, so a read-only host is a supported configuration.
+Throw an error carrying a POSIX `code` (`ENOENT`, `EEXIST`, `ENOTEMPTY`, …) to
+return that errno. File contents are buffered in memory while a descriptor is
+open and written back on close, so the adapter never sees partial writes.
 
 ## Security boundaries
 
@@ -304,7 +347,7 @@ The WebAssembly runtime intentionally does not provide:
 - Subagents or skills
 - Automatic upgrades
 - Clipboard integration
-- Arbitrary WASI filesystem access
+- Arbitrary WASI filesystem access; file calls reach only the host `fs` adapter, and only when one is supplied
 - Public web fetch, web search, and general outbound network access
 
 The embedded runtime tells the model not to retry unavailable network work

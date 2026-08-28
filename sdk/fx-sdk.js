@@ -213,11 +213,205 @@ function yieldToHostTask() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+const FILETYPE_UNKNOWN = 0;
+const FILETYPE_CHARACTER_DEVICE = 2;
+const FILETYPE_DIRECTORY = 3;
+const FILETYPE_REGULAR_FILE = 4;
+
+const ERRNO_SUCCESS = 0;
+const ERRNO_ACCES = 2;
+const ERRNO_BADF = 8;
+const ERRNO_EXIST = 20;
+const ERRNO_FBIG = 22;
+const ERRNO_INVAL = 28;
+const ERRNO_IO = 29;
+const ERRNO_ISDIR = 31;
+const ERRNO_NAMETOOLONG = 37;
+const ERRNO_NOENT = 44;
+const ERRNO_NOSYS = 52;
+const ERRNO_NOTDIR = 54;
+const ERRNO_NOTEMPTY = 55;
+const ERRNO_PERM = 63;
+const ERRNO_NOTCAPABLE = 76;
+
+const OFLAGS_CREAT = 1;
+const OFLAGS_DIRECTORY = 2;
+const OFLAGS_EXCL = 4;
+const OFLAGS_TRUNC = 8;
+const FDFLAGS_APPEND = 1;
+const RIGHTS_FD_WRITE = 64n;
+
+const fileSystemPathLimit = 4096;
+const fileSystemFileLimit = 32 * 1024 * 1024;
+const fileSystemErrnoByCode = {
+  EACCES: ERRNO_ACCES,
+  EEXIST: ERRNO_EXIST,
+  EINVAL: ERRNO_INVAL,
+  EISDIR: ERRNO_ISDIR,
+  ENAMETOOLONG: ERRNO_NAMETOOLONG,
+  ENOENT: ERRNO_NOENT,
+  ENOSYS: ERRNO_NOSYS,
+  ENOTDIR: ERRNO_NOTDIR,
+  ENOTEMPTY: ERRNO_NOTEMPTY,
+  EPERM: ERRNO_PERM,
+};
+
+function fileSystemError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function normalizeFsPath(base, path) {
+  const combined = path.startsWith("/") ? path : `${base === "/" ? "" : base}/${path}`;
+  const parts = [];
+  for (const part of combined.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") { parts.pop(); continue; }
+    parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+
+function parentFsPath(path) {
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "/" : path.slice(0, index);
+}
+
+function toFileBytes(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (typeof value === "string") return encoder.encode(value);
+  throw new TypeError("file contents must be a string, ArrayBuffer, or typed array");
+}
+
+export function createMemoryFileSystem(seed = {}) {
+  const contents = new Map();
+  const directories = new Set(["/"]);
+  const modified = new Map();
+
+  function addParents(path) {
+    let current = parentFsPath(path);
+    while (current !== "/" && !directories.has(current)) {
+      directories.add(current);
+      modified.set(current, Date.now());
+      current = parentFsPath(current);
+    }
+  }
+
+  function writeFile(path, value) {
+    const target = normalizeFsPath("/", path);
+    if (directories.has(target)) throw fileSystemError("EISDIR", `${target} is a directory`);
+    addParents(target);
+    contents.set(target, (toFileBytes(value) ?? new Uint8Array(0)).slice());
+    modified.set(target, Date.now());
+  }
+
+  function entriesUnder(path) {
+    const prefix = path === "/" ? "/" : `${path}/`;
+    const names = new Map();
+    const collect = (candidate, type) => {
+      if (candidate === path || !candidate.startsWith(prefix)) return;
+      const rest = candidate.slice(prefix.length);
+      const slash = rest.indexOf("/");
+      names.set(slash === -1 ? rest : rest.slice(0, slash), slash === -1 ? type : "dir");
+    };
+    contents.forEach((_value, candidate) => collect(candidate, "file"));
+    directories.forEach((candidate) => collect(candidate, "dir"));
+    return [...names].map(([name, type]) => ({ name, type }));
+  }
+
+  for (const [path, value] of Object.entries(seed)) writeFile(path, value);
+
+  return {
+    stat(path) {
+      const target = normalizeFsPath("/", path);
+      if (contents.has(target)) {
+        return { type: "file", size: contents.get(target).length, mtimeMs: modified.get(target) ?? 0 };
+      }
+      if (directories.has(target)) return { type: "dir", size: 0, mtimeMs: modified.get(target) ?? 0 };
+      return null;
+    },
+    read(path) {
+      return contents.get(normalizeFsPath("/", path)) ?? null;
+    },
+    write: writeFile,
+    list(path) {
+      const target = normalizeFsPath("/", path);
+      if (!directories.has(target)) return null;
+      return entriesUnder(target);
+    },
+    mkdir(path) {
+      const target = normalizeFsPath("/", path);
+      if (contents.has(target) || directories.has(target)) throw fileSystemError("EEXIST", `${target} exists`);
+      const parent = parentFsPath(target);
+      if (!directories.has(parent)) throw fileSystemError("ENOENT", `${parent} does not exist`);
+      directories.add(target);
+      modified.set(target, Date.now());
+    },
+    remove(path) {
+      const target = normalizeFsPath("/", path);
+      if (directories.has(target)) throw fileSystemError("EISDIR", `${target} is a directory`);
+      if (!contents.delete(target)) throw fileSystemError("ENOENT", `${target} does not exist`);
+      modified.delete(target);
+    },
+    rmdir(path) {
+      const target = normalizeFsPath("/", path);
+      if (target === "/") throw fileSystemError("EPERM", "cannot remove the root directory");
+      if (!directories.has(target)) throw fileSystemError(contents.has(target) ? "ENOTDIR" : "ENOENT", target);
+      if (entriesUnder(target).length) throw fileSystemError("ENOTEMPTY", `${target} is not empty`);
+      directories.delete(target);
+      modified.delete(target);
+    },
+    rename(from, to) {
+      const source = normalizeFsPath("/", from);
+      const target = normalizeFsPath("/", to);
+      if (source === target) return;
+      if (contents.has(source)) {
+        if (directories.has(target)) throw fileSystemError("EISDIR", `${target} is a directory`);
+        addParents(target);
+        contents.set(target, contents.get(source));
+        modified.set(target, Date.now());
+        contents.delete(source);
+        modified.delete(source);
+        return;
+      }
+      if (!directories.has(source)) throw fileSystemError("ENOENT", `${source} does not exist`);
+      if (contents.has(target) || directories.has(target)) throw fileSystemError("EEXIST", `${target} exists`);
+      const prefix = `${source}/`;
+      const moved = [...contents.keys()].filter((path) => path.startsWith(prefix));
+      const movedDirs = [...directories].filter((path) => path === source || path.startsWith(prefix));
+      movedDirs.forEach((path) => { directories.delete(path); directories.add(target + path.slice(source.length)); });
+      moved.forEach((path) => {
+        contents.set(target + path.slice(source.length), contents.get(path));
+        contents.delete(path);
+      });
+    },
+    snapshot() {
+      return Object.fromEntries([...contents].map(([path, value]) => [path, value.slice()]));
+    },
+  };
+}
+
+function prepareFileSystemAdapter(options) {
+  const adapter = options.fs ?? (options.files ? createMemoryFileSystem(options.files) : null);
+  if (adapter == null) return { present: false };
+  if (typeof adapter.stat !== "function" || typeof adapter.read !== "function") {
+    throw new TypeError("fs requires stat() and read()");
+  }
+  const root = typeof adapter.root === "string" ? normalizeFsPath("/", adapter.root) : "/";
+  return { present: true, adapter, root };
+}
+
 function createRuntime(options) {
   const stdin = new ByteQueue();
   const streams = new Map();
   const workspaceExecs = new Set();
   const workspace = prepareWorkspaceAdapter(options.workspace);
+  const files = prepareFileSystemAdapter(options);
+  const fds = new Map();
+  let nextFd = 4;
+  if (files.present) fds.set(3, { type: FILETYPE_DIRECTORY, path: files.root, preopen: files.root, mtimeMs: 0 });
   const args = ["fx", ...(options.args || [])];
   const env = Object.entries(options.env || {}).map(([key, value]) => `${key}=${value}`);
   let instance;
@@ -260,6 +454,10 @@ function createRuntime(options) {
 
   function fdWrite(fd, iovs, count, nwritten) {
     if (options.traceWasi) console.error("wasi fd_write", { fd, count });
+    const handle = fds.get(fd);
+    if (handle) {
+      return handle.type === FILETYPE_REGULAR_FILE ? writeToFile(handle, iovs, count, nwritten) : ERRNO_BADF;
+    }
     const view = new DataView(memory().buffer);
     let total = 0;
     for (let index = 0; index < count; index++) {
@@ -283,6 +481,10 @@ function createRuntime(options) {
   }
 
   function fdRead(fd, iovs, count, nread) {
+    const handle = fds.get(fd);
+    if (handle) {
+      return handle.type === FILETYPE_REGULAR_FILE ? readFromFile(handle, iovs, count, nread) : ERRNO_ISDIR;
+    }
     if (fd !== 0) return 8;
     const attempt = () => {
       const view = new DataView(memory().buffer);
@@ -718,6 +920,333 @@ function createRuntime(options) {
     workspaceExecs.forEach((state) => state.abort(-3));
   }
 
+  function fsErrno(error) {
+    if (options.traceWasi) console.error("wasi fs error", error);
+    return fileSystemErrnoByCode[error?.code] ?? ERRNO_IO;
+  }
+
+  function openFd(handle) {
+    const fd = nextFd++;
+    fds.set(fd, handle);
+    return fd;
+  }
+
+  function directoryHandle(fd) {
+    const handle = fds.get(fd);
+    return handle && handle.type === FILETYPE_DIRECTORY ? handle : null;
+  }
+
+  function resolveFsPath(handle, ptr, len) {
+    if (len > fileSystemPathLimit) return null;
+    const raw = text(ptr, len);
+    if (raw.includes("\0")) return null;
+    const path = normalizeFsPath(handle.path, raw);
+    if (files.root !== "/" && path !== files.root && !path.startsWith(`${files.root}/`)) return null;
+    return path;
+  }
+
+  function writeFilestat(out, filetype, size, mtimeMs) {
+    bytes(out, 64).fill(0);
+    const view = new DataView(memory().buffer);
+    view.setUint8(out + 16, filetype);
+    view.setBigUint64(out + 24, 1n, true);
+    view.setBigUint64(out + 32, BigInt(Math.max(0, Math.trunc(size || 0))), true);
+    const stamp = BigInt(Math.max(0, Math.trunc(mtimeMs || 0))) * 1000000n;
+    view.setBigUint64(out + 40, stamp, true);
+    view.setBigUint64(out + 48, stamp, true);
+    view.setBigUint64(out + 56, stamp, true);
+    return ERRNO_SUCCESS;
+  }
+
+  function readFromFile(handle, iovs, count, nread) {
+    const view = new DataView(memory().buffer);
+    let total = 0;
+    for (let index = 0; index < count; index++) {
+      const ptr = view.getUint32(iovs + index * 8, true);
+      const len = view.getUint32(iovs + index * 8 + 4, true);
+      const available = Math.min(len, handle.data.length - handle.cursor);
+      if (available <= 0) break;
+      bytes(ptr, available).set(handle.data.subarray(handle.cursor, handle.cursor + available));
+      handle.cursor += available;
+      total += available;
+      if (available < len) break;
+    }
+    writeU32(nread, total);
+    return ERRNO_SUCCESS;
+  }
+
+  function writeToFile(handle, iovs, count, nwritten) {
+    if (!handle.writable) return ERRNO_NOTCAPABLE;
+    const view = new DataView(memory().buffer);
+    let total = 0;
+    for (let index = 0; index < count; index++) total += view.getUint32(iovs + index * 8 + 4, true);
+    const start = handle.append ? handle.data.length : handle.cursor;
+    const end = start + total;
+    if (end > fileSystemFileLimit) return ERRNO_FBIG;
+    if (end > handle.data.length) {
+      const grown = new Uint8Array(end);
+      grown.set(handle.data);
+      handle.data = grown;
+    }
+    let offset = start;
+    for (let index = 0; index < count; index++) {
+      const ptr = view.getUint32(iovs + index * 8, true);
+      const len = view.getUint32(iovs + index * 8 + 4, true);
+      handle.data.set(bytes(ptr, len), offset);
+      offset += len;
+    }
+    handle.cursor = end;
+    handle.dirty = true;
+    writeU32(nwritten, total);
+    return ERRNO_SUCCESS;
+  }
+
+  async function flushFile(handle) {
+    if (!handle.dirty) return ERRNO_SUCCESS;
+    if (typeof files.adapter.write !== "function") return ERRNO_NOSYS;
+    try {
+      await files.adapter.write(handle.path, handle.data);
+      handle.dirty = false;
+      return ERRNO_SUCCESS;
+    } catch (error) {
+      return fsErrno(error);
+    }
+  }
+
+  async function pathOpen(dirfd, _dirflags, pathPtr, pathLen, oflags, rightsBase, _rightsInheriting, fdflags, openedPtr) {
+    const dir = directoryHandle(dirfd);
+    if (!dir) return ERRNO_BADF;
+    const path = resolveFsPath(dir, pathPtr, pathLen);
+    if (path === null) return ERRNO_NOTCAPABLE;
+    if (options.traceWasi) console.error("wasi path_open", { path, oflags, fdflags });
+    const create = (oflags & OFLAGS_CREAT) !== 0;
+    const exclusive = (oflags & OFLAGS_EXCL) !== 0;
+    const truncate = (oflags & OFLAGS_TRUNC) !== 0;
+    const wantsDirectory = (oflags & OFLAGS_DIRECTORY) !== 0;
+    const writable = (BigInt.asUintN(64, BigInt(rightsBase)) & RIGHTS_FD_WRITE) !== 0n;
+    try {
+      const info = await files.adapter.stat(path);
+      if (info?.type === "dir") {
+        if (create && exclusive) return ERRNO_EXIST;
+        if (writable) return ERRNO_ISDIR;
+        writeU32(openedPtr, openFd({ type: FILETYPE_DIRECTORY, path, mtimeMs: info.mtimeMs ?? 0 }));
+        return ERRNO_SUCCESS;
+      }
+      if (wantsDirectory) return info ? ERRNO_NOTDIR : ERRNO_NOENT;
+      if (info && create && exclusive) return ERRNO_EXIST;
+      if (!info && !create) return ERRNO_NOENT;
+      if (!info || truncate) {
+        if (typeof files.adapter.write !== "function") return ERRNO_NOSYS;
+        if (!info) {
+          const parent = await files.adapter.stat(parentFsPath(path));
+          if (!parent) return ERRNO_NOENT;
+          if (parent.type !== "dir") return ERRNO_NOTDIR;
+        }
+        await files.adapter.write(path, new Uint8Array(0));
+      }
+      const data = truncate || !info ? new Uint8Array(0) : (toFileBytes(await files.adapter.read(path)) ?? new Uint8Array(0)).slice();
+      const append = (fdflags & FDFLAGS_APPEND) !== 0;
+      writeU32(openedPtr, openFd({
+        type: FILETYPE_REGULAR_FILE,
+        path,
+        data,
+        cursor: append ? data.length : 0,
+        append,
+        writable,
+        dirty: false,
+        mtimeMs: info?.mtimeMs ?? 0,
+      }));
+      return ERRNO_SUCCESS;
+    } catch (error) {
+      return fsErrno(error);
+    }
+  }
+
+  async function fdClose(fd) {
+    const handle = fds.get(fd);
+    if (!handle) return ERRNO_SUCCESS;
+    fds.delete(fd);
+    return handle.type === FILETYPE_REGULAR_FILE ? await flushFile(handle) : ERRNO_SUCCESS;
+  }
+
+  async function fdSync(fd) {
+    const handle = fds.get(fd);
+    if (!handle) return ERRNO_SUCCESS;
+    return handle.type === FILETYPE_REGULAR_FILE ? await flushFile(handle) : ERRNO_SUCCESS;
+  }
+
+  async function fdReaddir(fd, buf, bufLen, cookie, bufusedPtr) {
+    const dir = directoryHandle(fd);
+    if (!dir) return ERRNO_BADF;
+    if (typeof files.adapter.list !== "function") return ERRNO_NOSYS;
+    let listed;
+    try {
+      listed = await files.adapter.list(dir.path);
+    } catch (error) {
+      return fsErrno(error);
+    }
+    if (!listed) return ERRNO_NOENT;
+    const entries = [
+      { name: ".", type: FILETYPE_DIRECTORY },
+      { name: "..", type: FILETYPE_DIRECTORY },
+      ...listed.map((entry) => typeof entry === "string"
+        ? { name: entry, type: FILETYPE_UNKNOWN }
+        : { name: entry.name, type: entry.type === "dir" ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE }),
+    ];
+    let used = 0;
+    for (let index = Number(cookie); index < entries.length && used < bufLen; index++) {
+      const name = encoder.encode(entries[index].name);
+      const record = new Uint8Array(24 + name.length);
+      const view = new DataView(record.buffer);
+      view.setBigUint64(0, BigInt(index + 1), true);
+      view.setUint32(16, name.length, true);
+      view.setUint8(20, entries[index].type);
+      record.set(name, 24);
+      const room = Math.min(record.length, bufLen - used);
+      bytes(buf + used, room).set(record.subarray(0, room));
+      used += room;
+    }
+    writeU32(bufusedPtr, used);
+    return ERRNO_SUCCESS;
+  }
+
+  async function pathFilestatGet(dirfd, _flags, pathPtr, pathLen, out) {
+    const dir = directoryHandle(dirfd);
+    if (!dir) return ERRNO_BADF;
+    const path = resolveFsPath(dir, pathPtr, pathLen);
+    if (path === null) return ERRNO_NOTCAPABLE;
+    try {
+      const info = await files.adapter.stat(path);
+      if (!info) return ERRNO_NOENT;
+      const filetype = info.type === "dir" ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE;
+      return writeFilestat(out, filetype, info.size ?? 0, info.mtimeMs ?? 0);
+    } catch (error) {
+      return fsErrno(error);
+    }
+  }
+
+  function pathMutation(name) {
+    return async (dirfd, pathPtr, pathLen) => {
+      const dir = directoryHandle(dirfd);
+      if (!dir) return ERRNO_BADF;
+      const path = resolveFsPath(dir, pathPtr, pathLen);
+      if (path === null) return ERRNO_NOTCAPABLE;
+      if (typeof files.adapter[name] !== "function") return ERRNO_NOSYS;
+      try {
+        await files.adapter[name](path);
+        return ERRNO_SUCCESS;
+      } catch (error) {
+        return fsErrno(error);
+      }
+    };
+  }
+
+  async function pathRename(fromFd, fromPtr, fromLen, toFd, toPtr, toLen) {
+    const fromDir = directoryHandle(fromFd);
+    const toDir = directoryHandle(toFd);
+    if (!fromDir || !toDir) return ERRNO_BADF;
+    const from = resolveFsPath(fromDir, fromPtr, fromLen);
+    const to = resolveFsPath(toDir, toPtr, toLen);
+    if (from === null || to === null) return ERRNO_NOTCAPABLE;
+    if (typeof files.adapter.rename !== "function") return ERRNO_NOSYS;
+    try {
+      await files.adapter.rename(from, to);
+      return ERRNO_SUCCESS;
+    } catch (error) {
+      return fsErrno(error);
+    }
+  }
+
+  const fileSystemImports = () => ({
+    fd_close: new WebAssembly.Suspending(fdClose),
+    fd_sync: new WebAssembly.Suspending(fdSync),
+    fd_datasync: new WebAssembly.Suspending(fdSync),
+    fd_readdir: new WebAssembly.Suspending(fdReaddir),
+    fd_advise() { return ERRNO_SUCCESS; },
+    fd_allocate() { return ERRNO_NOSYS; },
+    fd_fdstat_set_flags(fd, flags) {
+      const handle = fds.get(fd);
+      if (handle?.type === FILETYPE_REGULAR_FILE) handle.append = (flags & FDFLAGS_APPEND) !== 0;
+      return ERRNO_SUCCESS;
+    },
+    fd_filestat_get(fd, out) {
+      const handle = fds.get(fd);
+      if (!handle) return fd <= 2 ? writeFilestat(out, FILETYPE_CHARACTER_DEVICE, 0, 0) : ERRNO_BADF;
+      if (handle.type === FILETYPE_DIRECTORY) return writeFilestat(out, FILETYPE_DIRECTORY, 0, handle.mtimeMs);
+      return writeFilestat(out, FILETYPE_REGULAR_FILE, handle.data.length, handle.mtimeMs);
+    },
+    fd_filestat_set_size(fd, size) {
+      const handle = fds.get(fd);
+      if (!handle || handle.type !== FILETYPE_REGULAR_FILE) return ERRNO_BADF;
+      if (!handle.writable) return ERRNO_NOTCAPABLE;
+      const length = Number(size);
+      if (length > fileSystemFileLimit) return ERRNO_FBIG;
+      const resized = new Uint8Array(length);
+      resized.set(handle.data.subarray(0, Math.min(length, handle.data.length)));
+      handle.data = resized;
+      handle.cursor = Math.min(handle.cursor, length);
+      handle.dirty = true;
+      return ERRNO_SUCCESS;
+    },
+    fd_filestat_set_times() { return ERRNO_SUCCESS; },
+    fd_pread(fd, iovs, count, offset, nread) {
+      const handle = fds.get(fd);
+      if (!handle || handle.type !== FILETYPE_REGULAR_FILE) return ERRNO_BADF;
+      const cursor = handle.cursor;
+      handle.cursor = Number(offset);
+      const result = readFromFile(handle, iovs, count, nread);
+      handle.cursor = cursor;
+      return result;
+    },
+    fd_pwrite(fd, iovs, count, offset, nwritten) {
+      const handle = fds.get(fd);
+      if (!handle || handle.type !== FILETYPE_REGULAR_FILE) return ERRNO_BADF;
+      const cursor = handle.cursor;
+      const append = handle.append;
+      handle.cursor = Number(offset);
+      handle.append = false;
+      const result = writeToFile(handle, iovs, count, nwritten);
+      handle.cursor = cursor;
+      handle.append = append;
+      return result;
+    },
+    fd_prestat_get(fd, out) {
+      const handle = fds.get(fd);
+      if (!handle?.preopen) return ERRNO_BADF;
+      bytes(out, 8).fill(0);
+      writeU32(out + 4, encoder.encode(handle.preopen).length);
+      return ERRNO_SUCCESS;
+    },
+    fd_prestat_dir_name(fd, ptr, len) {
+      const handle = fds.get(fd);
+      if (!handle?.preopen) return ERRNO_BADF;
+      const name = encoder.encode(handle.preopen);
+      if (len < name.length) return ERRNO_NAMETOOLONG;
+      bytes(ptr, name.length).set(name);
+      return ERRNO_SUCCESS;
+    },
+    fd_renumber(from, to) {
+      const handle = fds.get(from);
+      if (!handle) return ERRNO_BADF;
+      fds.set(to, handle);
+      fds.delete(from);
+      return ERRNO_SUCCESS;
+    },
+    fd_tell(fd, out) {
+      const handle = fds.get(fd);
+      if (!handle || handle.type !== FILETYPE_REGULAR_FILE) return ERRNO_BADF;
+      writeU64(out, handle.cursor);
+      return ERRNO_SUCCESS;
+    },
+    path_create_directory: new WebAssembly.Suspending(pathMutation("mkdir")),
+    path_filestat_get: new WebAssembly.Suspending(pathFilestatGet),
+    path_filestat_set_times() { return ERRNO_SUCCESS; },
+    path_open: new WebAssembly.Suspending(pathOpen),
+    path_remove_directory: new WebAssembly.Suspending(pathMutation("rmdir")),
+    path_rename: new WebAssembly.Suspending(pathRename),
+    path_unlink_file: new WebAssembly.Suspending(pathMutation("remove")),
+  });
+
   const unavailable = () => 52;
   const wasi = {
     args_sizes_get(count, size) { if (options.traceWasi) console.error("wasi args_sizes_get"); writeU32(count, args.length); writeU32(size, args.reduce((n, v) => n + encoder.encode(v).length + 1, 0)); return 0; },
@@ -729,9 +1258,11 @@ function createRuntime(options) {
     fd_close() { return 0; },
     fd_fdstat_get(fd, out) {
       if (options.traceWasi) console.error("wasi fd_fdstat_get", fd);
+      const handle = fds.get(fd);
       bytes(out, 24).fill(0);
       const view = new DataView(memory().buffer);
-      view.setUint8(out, fd <= 2 ? 2 : 0);
+      view.setUint8(out, handle ? handle.type : fd <= 2 ? FILETYPE_CHARACTER_DEVICE : FILETYPE_UNKNOWN);
+      if (handle?.append) view.setUint16(out + 2, FDFLAGS_APPEND, true);
       view.setBigUint64(out + 8, 0xffffffffffffffffn, true);
       view.setBigUint64(out + 16, 0xffffffffffffffffn, true);
       return 0;
@@ -744,7 +1275,17 @@ function createRuntime(options) {
     fd_prestat_dir_name: unavailable,
     fd_pwrite: unavailable,
     fd_readdir: unavailable,
-    fd_seek() { return 29; },
+    fd_seek(fd, offset, whence, out) {
+      const handle = fds.get(fd);
+      if (!handle || handle.type !== FILETYPE_REGULAR_FILE) return 29;
+      if (whence > 2) return ERRNO_INVAL;
+      const base = whence === 0 ? 0 : whence === 1 ? handle.cursor : handle.data.length;
+      const next = base + Number(offset);
+      if (!Number.isFinite(next) || next < 0) return ERRNO_INVAL;
+      handle.cursor = next;
+      writeU64(out, next);
+      return ERRNO_SUCCESS;
+    },
     fd_sync() { return 0; },
     clock_res_get(_id, out) { if (options.traceWasi) console.error("wasi clock_res_get"); writeU64(out, 1000000n); return 0; },
     clock_time_get(_id, _precision, out) { if (options.traceWasi) console.error("wasi clock_time_get"); writeU64(out, BigInt(Date.now()) * 1000000n); return 0; },
@@ -762,6 +1303,8 @@ function createRuntime(options) {
     poll_oneoff: new WebAssembly.Suspending(pollOneoff),
     proc_exit(code) { if (options.traceWasi) console.error("wasi proc_exit", code); markExited(code); throw new WebAssembly.RuntimeError(`proc_exit(${code})`); },
   };
+
+  if (files.present) Object.assign(wasi, fileSystemImports());
 
   const fx = {
     fx_term_poll_input: new WebAssembly.Suspending(termPollInput),
