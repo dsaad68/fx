@@ -1109,19 +1109,29 @@ fn configuredProviderSelection(
     settings: *const config_runtime.Settings,
 ) !model_provider.ProviderSelection {
     const provider = settings.provider orelse .gateway;
+    // Gateway has a built-in default, so its configured model stays exactly
+    // what the files said and FX_MODEL applies later, at selection. The other
+    // providers have no default and abort instead — there a process override
+    // is the only candidate, and without it FX_PROVIDER is unusable on a host
+    // with no settings file to read: the WebAssembly embedder, or CI.
     const model = settings.models.get(provider) orelse switch (provider) {
         .gateway => default_model,
-        .codex => return error.CodexModelNotSelected,
-        .grok => return error.GrokModelNotSelected,
-        .openrouter => return error.OpenRouterModelNotSelected,
+        .codex => processModelOverride() orelse return error.CodexModelNotSelected,
+        .grok => processModelOverride() orelse return error.GrokModelNotSelected,
+        .openrouter => processModelOverride() orelse return error.OpenRouterModelNotSelected,
     };
     return .{ .provider = provider, .model = model };
 }
 
-fn initialModelId(default_model: []const u8, configured: ?[]const u8) []const u8 {
-    const model = io_mod.getenv("FX_MODEL") orelse return configured orelse default_model;
+/// The trimmed FX_MODEL value, or null when unset or blank.
+fn processModelOverride() ?[]const u8 {
+    const model = io_mod.getenv("FX_MODEL") orelse return null;
     const trimmed = std.mem.trim(u8, model, " \t\r\n");
-    return if (trimmed.len > 0) trimmed else configured orelse default_model;
+    return if (trimmed.len > 0) trimmed else null;
+}
+
+fn initialModelId(default_model: []const u8, configured: ?[]const u8) []const u8 {
+    return processModelOverride() orelse configured orelse default_model;
 }
 
 test "startup provider chooses only its provider-scoped model" {
@@ -1157,8 +1167,7 @@ fn loadInitialModel(alloc: Allocator, default_model: []const u8, configured: ?[]
 }
 
 fn hasProcessModelOverride() bool {
-    const model = io_mod.getenv("FX_MODEL") orelse return false;
-    return std.mem.trim(u8, model, " \t\r\n").len > 0;
+    return processModelOverride() != null;
 }
 
 fn loadStartupStatusModel(alloc: Allocator, default_model: []const u8, configured: ?[]const u8) !StartupStatusModel {

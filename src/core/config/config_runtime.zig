@@ -508,15 +508,8 @@ fn loadMergedSettingsDetailedWithOptionalHome(
     }
 
     if (io_mod.getenv("FX_MODEL")) |model_override| {
-        const trimmed = std.mem.trim(u8, model_override, " \t\r\n");
-        if (trimmed.len > 0) {
-            const provider = settings.provider orelse .gateway;
-            // Record the value, not just its source. Gateway falls back to a
-            // built-in default when no model is configured, so it survived on
-            // the source alone; every other provider errors without one, which
-            // left FX_PROVIDER unusable on a host with no settings file.
-            try settings.models.putCopy(alloc, provider, trimmed);
-            sources.models.set(provider, .process_override);
+        if (std.mem.trim(u8, model_override, " \t\r\n").len > 0) {
+            sources.models.set(settings.provider orelse .gateway, .process_override);
         }
     }
 
