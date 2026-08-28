@@ -29,6 +29,15 @@ pub const agent_stream_provider = stream_provider.Provider{
     .stream_fn = streamCompletion,
 };
 
+/// The chat endpoint, honouring the loopback-only end-to-end override. Exposed
+/// so alternate transports (the WebAssembly host) target the same URL.
+pub fn chatUrl() []const u8 {
+    if (io_mod.getenv(e2e_endpoint_env)) |override| {
+        if (gateway_client.isLoopbackHttpUrl(override)) return override;
+    }
+    return endpoint;
+}
+
 fn validateModel(model: []const u8) !void {
     if (model.len == 0 or model.len > 256) return error.InvalidOpenRouterModel;
     for (model) |byte| {
@@ -282,7 +291,17 @@ pub fn streamPrepared(
     }
 
     var transfer_buffer: [transfer_buffer_bytes]u8 = undefined;
-    const reader = response.reader(&transfer_buffer);
+    return consumeStreamBody(alloc, response.reader(&transfer_buffer), request);
+}
+
+/// Reduces an open OpenRouter SSE body from any reader. The native transport
+/// and the WebAssembly host transport both land here, so the wire protocol has
+/// exactly one implementation and cannot drift between hosts.
+pub fn consumeStreamBody(
+    alloc: Allocator,
+    reader: anytype,
+    request: stream_provider.ModelRequest,
+) !stream_provider.Result {
     var events = request.events;
     const reduced = try consumeSse(
         alloc,

@@ -2,6 +2,7 @@ const std = @import("std");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_client = @import("client.zig");
+const openrouter = @import("openrouter.zig");
 const credential_authority = @import("../core/auth/credential_authority.zig");
 
 const Allocator = std.mem.Allocator;
@@ -32,10 +33,15 @@ pub const Transport = struct {
     }
 };
 
+/// Which wire protocol the endpoint speaks. The transport is identical either
+/// way — only the request headers and the response reduction differ.
+pub const Protocol = enum { gateway, openrouter };
+
 pub const ProviderContext = struct {
     build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
     endpoint: Endpoint,
     transport: Transport,
+    protocol: Protocol = .gateway,
 };
 
 pub const Endpoint = union(enum) {
@@ -62,7 +68,21 @@ pub fn initContext(
     endpoint: Endpoint,
     transport: Transport,
 ) ProviderContext {
-    return .{ .build_fn = build_fn, .endpoint = endpoint, .transport = transport };
+    return initContextWithProtocol(build_fn, endpoint, transport, .gateway);
+}
+
+pub fn initContextWithProtocol(
+    build_fn: *const fn (Allocator, stream_provider.RequestData) anyerror![]u8,
+    endpoint: Endpoint,
+    transport: Transport,
+    protocol: Protocol,
+) ProviderContext {
+    return .{
+        .build_fn = build_fn,
+        .endpoint = endpoint,
+        .transport = transport,
+        .protocol = protocol,
+    };
 }
 
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequest) anyerror!stream_provider.Result {
@@ -81,16 +101,33 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
         .{ .name = "authorization", .value = auth },
         .{ .name = "HTTP-Referer", .value = "https://github.com/vercel-labs/fx" },
         .{ .name = "X-Title", .value = "fx" },
-        .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
-        .{ .name = "ai-language-model-specification-version", .value = "4" },
-        .{ .name = "ai-language-model-id", .value = request.model },
-        .{ .name = "ai-language-model-streaming", .value = "true" },
     });
-    if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
-    if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
-        .{ .name = "x-session-id", .value = session_id },
-        .{ .name = "x-session-affinity", .value = session_id },
-    });
+    switch (context.protocol) {
+        .gateway => {
+            try headers.appendSlice(alloc, &.{
+                .{ .name = "ai-gateway-protocol-version", .value = "0.0.1" },
+                .{ .name = "ai-language-model-specification-version", .value = "4" },
+                .{ .name = "ai-language-model-id", .value = request.model },
+                .{ .name = "ai-language-model-streaming", .value = "true" },
+            });
+            if (request.credential.tenant) |team| if (team.len > 0) try headers.append(alloc, .{ .name = "x-vercel-ai-gateway-team", .value = team });
+            if (request.session_id) |session_id| if (session_id.len > 0) try headers.appendSlice(alloc, &.{
+                .{ .name = "x-session-id", .value = session_id },
+                .{ .name = "x-session-affinity", .value = session_id },
+            });
+        },
+        // A browser host preflights this request, and OpenRouter's CORS policy
+        // allows a short list of headers. Sending the gateway's `ai-*` headers
+        // here fails the preflight before the request is ever made, so the set
+        // stays inside what the endpoint advertises.
+        .openrouter => {
+            try headers.append(alloc, .{ .name = "accept", .value = "text/event-stream" });
+            if (request.session_id) |session_id| if (session_id.len > 0) try headers.append(
+                alloc,
+                .{ .name = "x-session-id", .value = session_id },
+            );
+        },
+    }
 
     var headers_json: std.Io.Writer.Allocating = .init(alloc);
     defer headers_json.deinit();
@@ -122,6 +159,17 @@ fn stream(raw: ?*anyopaque, alloc: Allocator, request: stream_provider.ModelRequ
 
     var reader: HostStreamReader = undefined;
     reader.init(transport, handle, request.cancel_flag, request.cooperative_pulse);
+
+    if (context.protocol == .openrouter) {
+        return openrouter.consumeStreamBody(alloc, &reader.interface, request) catch |err| switch (err) {
+            error.ReadFailed => if (request.cancel_flag.load(.seq_cst) or reader.aborted)
+                error.Cancelled
+            else
+                error.HostStreamFailed,
+            else => err,
+        };
+    }
+
     var events = request.events;
     const completion = gateway_client.consumeGatewaySseStream(
         alloc,

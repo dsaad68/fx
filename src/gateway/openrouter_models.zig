@@ -100,6 +100,15 @@ fn fetchCatalogForProvider(
     return .{ .catalog = catalog };
 }
 
+/// The catalog endpoint, honouring the loopback-only end-to-end override.
+/// Exposed so alternate transports (the WebAssembly host) target the same URL.
+pub fn modelsEndpoint() []const u8 {
+    if (io_mod.getenv(e2e_models_endpoint_env)) |override| {
+        if (gateway_client.isLoopbackHttpUrl(override)) return override;
+    }
+    return default_models_endpoint;
+}
+
 fn catalogFetchFailure(err: anyerror) model_catalog.Failure {
     if (err == error.Cancelled) return .{ .category = .cancellation };
     if (err == error.OpenRouterModelCatalogTooLarge) return .{ .category = .malformed_response };

@@ -497,6 +497,16 @@ fn loadMergedSettingsDetailedWithOptionalHome(
         }
     }
 
+    // A host with no settings file on disk — the WebAssembly embedder, or a CI
+    // run — still needs a way to choose a provider, so the environment can name
+    // one. Read before FX_MODEL, which keys its source off the active provider.
+    if (io_mod.getenv("FX_PROVIDER")) |provider_override| {
+        const trimmed = std.mem.trim(u8, provider_override, " \t\r\n");
+        if (trimmed.len > 0) {
+            if (model_provider.parse(trimmed)) |parsed| settings.provider = parsed;
+        }
+    }
+
     if (io_mod.getenv("FX_MODEL")) |model_override| {
         if (std.mem.trim(u8, model_override, " \t\r\n").len > 0) {
             sources.models.set(settings.provider orelse .gateway, .process_override);

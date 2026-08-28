@@ -131,6 +131,9 @@ const worker_runtime = @import("core/agent/worker_runtime.zig");
 const question_prompt = @import("core/agent/question_prompt.zig");
 const gateway_client = @import("gateway/client.zig");
 const js_host_stream_provider = @import("gateway/js_host_stream_provider.zig");
+const js_host_openrouter_stream_provider = @import("gateway/js_host_openrouter_stream_provider.zig");
+const js_host_openrouter_models = @import("gateway/js_host_openrouter_models.zig");
+const openrouter_permission_reviewer = @import("gateway/openrouter_permission_reviewer.zig");
 const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
 const url_opener = @import("core/hosts/url_opener.zig");
 const event_loop = @import("ui/event_loop.zig");
@@ -1731,20 +1734,37 @@ const App = struct {
 
     pub fn providerSet(_: *const App) provider_set.Set {
         if (comptime host_target.is_wasm) {
-            return provider_set.gateway_only(.{
-                .capabilities = .{
-                    .vision_fallback = host_profile.tools,
+            // Gateway and OpenRouter both reach the network through the host's
+            // fetch port, so both are available here. Codex and Grok stay out:
+            // their sign-in flows have no WebAssembly path.
+            return .{
+                .gateway = .{
+                    .capabilities = .{
+                        .vision_fallback = host_profile.tools,
+                    },
+                    .presentation = provider_catalog.find(.gateway),
+                    .auth_strategy = .vercel,
+                    .fallback_model_capabilities_fn = vercel_model_policy.capabilitiesForModel,
+                    .agent_stream = js_host_stream_provider.provider(),
+                    .model_catalog = js_host_model_catalog.provider,
+                    .permission_reviewer = if (comptime host_profile.tools)
+                        builtin_gateway.permission_reviewer.provider
+                    else
+                        null,
                 },
-                .presentation = provider_catalog.find(.gateway),
-                .auth_strategy = .vercel,
-                .fallback_model_capabilities_fn = vercel_model_policy.capabilitiesForModel,
-                .agent_stream = js_host_stream_provider.provider(),
-                .model_catalog = js_host_model_catalog.provider,
-                .permission_reviewer = if (comptime host_profile.tools)
-                    builtin_gateway.permission_reviewer.provider
-                else
-                    null,
-            });
+                .codex = .{},
+                .grok = .{},
+                .openrouter = .{
+                    .presentation = provider_catalog.find(.openrouter),
+                    .auth_strategy = .openrouter,
+                    .agent_stream = js_host_openrouter_stream_provider.provider(),
+                    .model_catalog = js_host_openrouter_models.provider,
+                    .permission_reviewer = if (comptime host_profile.tools)
+                        openrouter_permission_reviewer.provider
+                    else
+                        null,
+                },
+            };
         }
         var providers = builtin_providers.native;
         if (comptime !host_profile.tools) {

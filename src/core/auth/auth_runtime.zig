@@ -402,16 +402,19 @@ pub const PickerView = struct {
         return sourceLabelOrMissing(self.active_source);
     }
 
+    /// Providers this host can actually reach. Codex and Grok need a browser
+    /// sign-in flow that the WebAssembly host has no path for; Gateway and
+    /// OpenRouter both stream through the host fetch port.
+    const selectable_providers: []const model_provider.ProviderId = if (host_target.is_wasm)
+        &.{ .gateway, .openrouter }
+    else
+        &.{ .gateway, .codex, .grok, .openrouter };
+
     pub fn choiceCount(self: PickerView) usize {
         return switch (self.stage) {
-            .root => if (self.include_skip)
-                connectionChoiceCount()
-            else if (comptime host_target.is_wasm)
-                3
-            else
-                4,
+            .root => if (self.include_skip) connectionChoiceCount() else 4,
             .connections => connectionChoiceCount(),
-            .provider => if (comptime host_target.is_wasm) 2 else 4,
+            .provider => selectable_providers.len,
             .sign_in, .api_key => 0,
             .change_team => blk: {
                 var count: usize = 0;
@@ -426,14 +429,7 @@ pub const PickerView = struct {
 
     pub fn choiceAt(self: PickerView, index: usize) ?Choice {
         return switch (self.stage) {
-            .root => if (self.include_skip) connectionChoiceAt(index) else if (comptime host_target.is_wasm)
-                switch (index) {
-                    0 => .{ .action = .connections },
-                    1 => .{ .action = .change_team },
-                    2 => .{ .action = .switch_credential },
-                    else => null,
-                }
-            else switch (index) {
+            .root => if (self.include_skip) connectionChoiceAt(index) else switch (index) {
                 0 => .{ .action = .connections },
                 1 => .{ .action = .switch_provider },
                 2 => .{ .action = .change_team },
@@ -441,15 +437,10 @@ pub const PickerView = struct {
                 else => null,
             },
             .connections => connectionChoiceAt(index),
-            .provider => switch (index) {
-                0 => .{ .provider = .gateway },
-                1 => .{ .provider = .codex },
-                2 => if (comptime host_target.is_wasm) null else .{ .provider = .grok },
-                // OpenRouter needs no browser flow, but its transport is native
-                // only, so the WASM host does not offer it.
-                3 => if (comptime host_target.is_wasm) null else .{ .provider = .openrouter },
-                else => null,
-            },
+            .provider => if (index < selectable_providers.len)
+                .{ .provider = selectable_providers[index] }
+            else
+                null,
             .sign_in, .api_key => null,
             .change_team => blk: {
                 var visible_index: usize = 0;
@@ -525,8 +516,7 @@ pub const PickerView = struct {
         return switch (choice) {
             .action => |action| (action != .change_team or self.fx_login_session_available) and
                 (action != .chatgpt_login or !host_target.is_wasm) and
-                (action != .grok_login or !host_target.is_wasm) and
-                (action != .openrouter_key or !host_target.is_wasm),
+                (action != .grok_login or !host_target.is_wasm),
             .provider, .source, .team => true,
         };
     }
