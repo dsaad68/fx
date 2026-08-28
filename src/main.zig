@@ -1877,32 +1877,34 @@ const App = struct {
         RenderAppRuntime.acknowledgeVisibleSubagentChildBeforeClose(self);
     }
 
+    /// The catalog belonging to the provider actually in use. The WebAssembly
+    /// host hardcoded the Gateway catalog because Gateway was the only provider
+    /// it could reach; with more than one, that listed models the active
+    /// provider rejects, and picking one fails the next request.
+    fn activeModelCatalog(self: *App) ?model_catalog.Provider {
+        return self.providerSet()
+            .select(self.provider_selection.selection().provider)
+            .model_catalog;
+    }
+
     pub fn fetchModelIds(self: *App) !std.ArrayList([]u8) {
         return AgentAppRuntime.fetchModelIds(
             self,
-            if (comptime host_target.is_wasm)
-                js_host_model_catalog.provider
-            else
-                self.providerSet().select(self.provider_selection.selection().provider).model_catalog orelse unreachable,
+            self.activeModelCatalog() orelse return error.ModelCatalogUnavailable,
             builtin_gateway.models_path,
         );
     }
 
     pub fn startModelCacheWarmup(self: *App) void {
+        const catalog = self.activeModelCatalog() orelse return;
         if (comptime host_profile.cooperative_agent) {
             if (self.auth.credentialNeedsRefresh()) {
                 debug_trace.logf("auth", "model_cache_warmup_deferred reason=credential_refresh_required", .{});
                 return;
             }
-            self.model_cache.loadCooperative(
-                js_host_model_catalog.provider,
-                self.auth.modelCatalogAccess(),
-            );
+            self.model_cache.loadCooperative(catalog, self.auth.modelCatalogAccess());
         } else {
-            self.model_cache.startWarmup(
-                self.providerSet().select(self.provider_selection.selection().provider).model_catalog orelse unreachable,
-                self.auth.modelCatalogAccess(),
-            );
+            self.model_cache.startWarmup(catalog, self.auth.modelCatalogAccess());
         }
     }
 
