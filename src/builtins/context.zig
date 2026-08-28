@@ -243,8 +243,21 @@ const SelectionScratch = struct {
     }
 };
 
+/// WebAssembly hosts may or may not back the runtime with a filesystem. Probe
+/// the preopen root once so instruction files load when one is present and stay
+/// silently unavailable when it is not.
+var wasm_filesystem: enum { unknown, present, absent } = .unknown;
+
 fn loadsProjectInstructionFiles() bool {
-    return !host_target.is_wasm;
+    if (!host_target.is_wasm) return true;
+    if (wasm_filesystem == .unknown) {
+        const root = std.Io.Dir.cwd().statFile(io_mod.getIo(), "/", .{ .follow_symlinks = false }) catch {
+            wasm_filesystem = .absent;
+            return false;
+        };
+        wasm_filesystem = if (root.kind == .directory) .present else .absent;
+    }
+    return wasm_filesystem == .present;
 }
 
 fn gatherProjectContext(alloc: Allocator, input: InitialContextInput) context_contract.ProviderError!ProviderContext {

@@ -105,7 +105,7 @@ try {
 const opened = [];
 const seeded = createMemoryFileSystem({
   "/home/user/.fx/settings.json": '{"model":"sdk/term-model"}',
-  "/home/user/project/AGENTS.md": "# wasi files\n",
+  "/AGENTS.md": "# wasi files\n",
 });
 const observed = { ...seeded, stat: (path) => { opened.push(path); return seeded.stat(path); } };
 const termTerminal = silentTerminal();
@@ -119,11 +119,15 @@ const term = await createFxTerminal({
 const timer = setTimeout(() => { failures.push("fx terminal never became interactive"); }, 10000);
 await Promise.race([term.interactive, new Promise((resolve) => setTimeout(resolve, 10000))]);
 clearTimeout(timer);
+term.write("read the project instructions\r");
+await new Promise((resolve) => setTimeout(resolve, 2000));
 term.abort();
 check("fx resolved the home config", opened.includes("/home/user/.fx/settings.json"), true);
+check("fx looked for project instructions", opened.includes("/AGENTS.md"), true);
 
 if (failures.length) {
   console.error(`FAIL\n${failures.map((line) => `  ${line}`).join("\n")}`);
   process.exit(1);
 }
 console.log("wasi files ok");
+process.exit(0); // an aborted terminal can leave the host fetch and its timers pending
