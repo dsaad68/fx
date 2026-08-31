@@ -63,7 +63,7 @@ pub fn authPickerRowCount(view: auth_runtime.PickerView) u16 {
         };
     }
     if (view.stage == .api_key) return 4;
-    if (view.stage == .root and view.include_skip) return 18;
+    if (view.stage == .root and view.include_skip) return onboarding_row_count;
     if (isSetupListStage(view.stage)) return @intCast(2 + @max(view.choiceCount(), 1));
     return @intCast(1 + @max(view.choiceCount(), 1));
 }
@@ -297,7 +297,7 @@ pub noinline fn composeAuthPickerRow(
         );
     }
     if (view.stage == .api_key) {
-        return composeApiKeyPickerRow(alloc, view.api_key_mask_count, row_index, width);
+        return composeApiKeyPickerRow(alloc, view.api_key_target, view.api_key_mask_count, row_index, width);
     }
     if (view.stage == .root and view.include_skip) {
         return composeOnboardingPickerRow(alloc, view, row_index, row_count, width);
@@ -355,14 +355,19 @@ fn prioritizedRowIndex(
 const onboarding_note = "   ⚠︎ Note: fx is experimental and defaults to auto mode.";
 const onboarding_note_link = onboarding_note ++ " \x1b]8;id=fx-onboarding;https://fx.sh/docs/stability\x1b\\\x1b[4mLearn more\x1b[24m\x1b]8;;\x1b\\";
 
-fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, row_count: u16) u16 {
-    if (row_count >= 18) return row_index;
+/// Rows 8 through 12 carry the connection choices; the copy above and below is
+/// laid out around them, so adding a choice moves every row after the block.
+const onboarding_first_choice_row: u16 = 8;
+const onboarding_row_count: u16 = 19;
 
-    const selected_row: u16 = 8 + @as(u16, @intCast(view.selectedIndex()));
-    const priority = [_]u16{ selected_row, 11, 9, 10, 8, 15, 7, 12, 5, 0, 2, 3, 6, 13, 14, 1, 4, 16, 17 };
+fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, row_count: u16) u16 {
+    if (row_count >= onboarding_row_count) return row_index;
+
+    const selected_row: u16 = onboarding_first_choice_row + @as(u16, @intCast(view.selectedIndex()));
+    const priority = [_]u16{ selected_row, 11, 9, 10, 8, 12, 16, 7, 13, 5, 0, 2, 3, 6, 14, 15, 1, 4, 17, 18 };
 
     var projected_index: u16 = 0;
-    for (0..18) |source_row| {
+    for (0..onboarding_row_count) |source_row| {
         for (priority[0..@min(row_count, priority.len)]) |included_row| {
             if (source_row != included_row) continue;
             if (projected_index == row_index) return @intCast(source_row);
@@ -370,7 +375,7 @@ fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, ro
             break;
         }
     }
-    return 17;
+    return onboarding_row_count - 2;
 }
 
 fn composeOnboardingPickerRow(
@@ -385,13 +390,11 @@ fn composeOnboardingPickerRow(
     if (width == 0) return row;
 
     const source_row_index = onboardingProjectedRowIndex(view, row_index, row_count);
-    const maybe_choice_index: ?usize = switch (source_row_index) {
-        8 => 0,
-        9 => 1,
-        10 => 2,
-        11 => 3,
-        else => null,
-    };
+    const maybe_choice_index: ?usize = if (source_row_index >= onboarding_first_choice_row and
+        source_row_index < onboarding_first_choice_row + view.choiceCount())
+        source_row_index - onboarding_first_choice_row
+    else
+        null;
     if (maybe_choice_index) |choice_index| {
         const choice = view.choiceAt(choice_index) orelse return row;
         const selected = view.choiceIsSelected(choice);
@@ -417,10 +420,10 @@ fn composeOnboardingPickerRow(
         5 => "   You can change this anytime with /setup.",
         6 => "",
         7 => "   Get started",
-        12 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
-        13, 14 => "",
-        15 => "   Esc to set up later · Explore all commands with /help",
-        16, 17 => "",
+        13 => if (display_width.visibleWidthIgnoringAnsi(onboarding_note_link) <= width) onboarding_note_link else onboarding_note,
+        14, 15 => "",
+        16 => "   Esc to set up later · Explore all commands with /help",
+        17, 18 => "",
         else => "",
     };
     try row_text.appendClipped(alloc, &row, label, width);
@@ -597,6 +600,7 @@ fn composeSignInPickerRow(
 
 fn composeApiKeyPickerRow(
     alloc: Allocator,
+    target: auth_runtime.ApiKeyTarget,
     mask_count: usize,
     row_index: u16,
     width: u16,
@@ -610,7 +614,10 @@ fn composeApiKeyPickerRow(
     else
         ui_render.dim_style);
     switch (row_index) {
-        0 => try row_text.appendClipped(alloc, &row, "   Paste your AI Gateway API key", width),
+        0 => try row_text.appendClipped(alloc, &row, switch (target) {
+            .gateway => "   Paste your AI Gateway API key",
+            .openrouter => "   Paste your OpenRouter API key",
+        }, width),
         1 => {
             try row_text.appendClipped(alloc, &row, "   ┃ ", width);
             if (mask_count == 0) {
@@ -648,8 +655,21 @@ pub fn activeListPickerReservedRows(terminal_rows: u16, input_extra: u16, banner
     return @min(input_presentation.max_model_picker_rows, available_rows);
 }
 
+/// The hub's own screens hold a fixed, small set of rows, so they are sized by
+/// what they contain rather than by the shared picker cap. Only the team and
+/// credential lists grow with the account, and those keep the cap.
+fn authStageFitsWithoutScrolling(stage: auth_runtime.PickerStage) bool {
+    return switch (stage) {
+        .root, .connections, .provider => true,
+        .change_team, .switch_credential, .sign_in, .api_key => false,
+    };
+}
+
 pub fn authPickerReservedRows(view: auth_runtime.PickerView, terminal_rows: u16, input_extra: u16, banner_rows: u16) u16 {
-    if (view.stage == .sign_in or (view.stage == .root and view.include_skip)) {
+    if (view.stage == .sign_in or
+        (view.stage == .root and view.include_skip) or
+        authStageFitsWithoutScrolling(view.stage))
+    {
         const available_rows = terminal_rows -| (5 +| input_extra +| banner_rows);
         return @min(authPickerRowCount(view), @max(available_rows, 1));
     }
@@ -2098,7 +2118,7 @@ test "auth onboarding composes the welcome copy and setup choices" {
         .include_skip = true,
     };
 
-    try std.testing.expectEqual(@as(u16, 18), authPickerRowCount(view));
+    try std.testing.expectEqual(onboarding_row_count, authPickerRowCount(view));
     var screen: std.ArrayList(u8) = .empty;
     defer screen.deinit(alloc);
     for (0..authPickerRowCount(view)) |row_index| {
@@ -2115,6 +2135,7 @@ test "auth onboarding composes the welcome copy and setup choices" {
     try std.testing.expect(std.mem.find(u8, screen.items, "Learn more: https://") == null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Vercel") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Add an API key") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "OpenRouter API key") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Esc to set up later · Explore all commands with /help") != null);
 
     var body_row = try composeAuthPickerRow(alloc, view, 2, authPickerRowCount(view), 100);
@@ -2141,7 +2162,11 @@ test "auth onboarding composes the welcome copy and setup choices" {
     defer unselected_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, unselected_row.items, "Add an API key") != null);
 
-    var narrow_note = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 58);
+    var openrouter_row = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 100);
+    defer openrouter_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, openrouter_row.items, "OpenRouter API key") != null);
+
+    var narrow_note = try composeAuthPickerRow(alloc, view, 13, authPickerRowCount(view), 58);
     defer narrow_note.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, narrow_note.items, "https://fx.sh/docs/stability") == null);
 

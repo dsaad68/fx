@@ -103,8 +103,8 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .setup,
         .token = "setup",
-        .usage = "setup",
-        .summary = "Configure an AI Gateway API key",
+        .usage = "setup [gateway|openrouter]",
+        .summary = "Save an API key for a provider",
     },
     .{
         .kind = .status,
@@ -308,7 +308,7 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
         .{ .kind = .models, .usage = "models" },
     } },
     .{ .entries = &.{
-        .{ .kind = .setup, .usage = "setup", .summary = "Configure a Vercel AI Gateway API key" },
+        .{ .kind = .setup, .usage = "setup [gateway|openrouter]", .summary = "Save an API key for a provider" },
         .{ .kind = .teams, .usage = "teams", .summary = "Choose a Vercel AI Gateway team" },
         .{ .kind = .credits, .usage = "credits|balance", .summary = "Show Vercel AI Gateway credits" },
     } },
@@ -431,8 +431,8 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .continue_recovery, .command = "/continue", .help_entry = "/continue", .completion_description = "continue a paused model response", .presentation_category = .session, .requires_prompt_credential = true },
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
     .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "choose Vercel or Codex sign-in", .presentation_category = .account },
-    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout [vercel|codex|grok]", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
-    .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "manage accounts and AI Gateway access", .presentation_category = .account },
+    .{ .kind = .logout, .command = "/logout", .help_entry = "/logout [vercel|codex|grok|openrouter]", .completion_description = "sign out of a provider session", .presentation_category = .account, .has_args = true, .accepts_payload = true },
+    .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "manage accounts and provider access", .presentation_category = .account },
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
     .{ .kind = .usage, .command = "/usage", .aliases = &.{"/cost"}, .help_entry = "/usage (/cost)", .completion_description = "show local fx tokens, models, and spend", .presentation_category = .account },
     .{ .kind = .status, .command = "/status", .help_entry = "/status", .completion_description = "show runtime configuration", .presentation_category = .general, .show_in_welcome = true },

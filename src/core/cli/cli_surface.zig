@@ -197,6 +197,16 @@ const ModelsSurfaceOptions = struct {
     free_only: bool = false,
 };
 
+/// `fx setup` with no argument keeps its original meaning, so existing scripts
+/// still reach the Gateway key.
+fn parseSetupTarget(rest: []const [:0]const u8) ?auth_runtime.ApiKeyTarget {
+    if (rest.len == 0) return .gateway;
+    if (rest.len != 1) return null;
+    if (std.mem.eql(u8, rest[0], "gateway")) return .gateway;
+    if (std.mem.eql(u8, rest[0], "openrouter")) return .openrouter;
+    return null;
+}
+
 fn parseLoginProvider(rest: []const [:0]const u8) !?model_provider.ProviderId {
     if (rest.len == 0) return null;
     if (rest.len != 1) return error.InvalidLoginProviderArgs;
@@ -1002,9 +1012,9 @@ fn runNonInteractiveWithDeps(
                     if (!key_present) {
                         try writeStderr(
                             deps,
-                            "fx login: OpenRouter uses an API key; set " ++
+                            "fx login: OpenRouter uses an API key; run fx setup openrouter, or set " ++
                                 credentials.openrouter_api_key_env ++
-                                " and run fx provider openrouter\n",
+                                ", then run fx provider openrouter\n",
                         );
                         return .handled_failure;
                     }
@@ -1043,14 +1053,17 @@ fn runNonInteractiveWithDeps(
                     },
                 };
             }
-            // OpenRouter keeps no session of its own, so there is nothing to
-            // remove. Say so rather than falling through to the Vercel logout.
+            // OpenRouter keeps no session of its own, only a key. `fx logout`
+            // does not delete saved keys for any provider, so say where the key
+            // lives rather than falling through to the Vercel logout.
             if (login_provider == .openrouter) {
-                try writeStdout(
-                    deps,
-                    "OpenRouter has no stored session; unset " ++
-                        credentials.openrouter_api_key_env ++ " to stop using it.\n",
+                const message = try std.fmt.allocPrint(
+                    alloc,
+                    "OpenRouter has no login session. Its key stays in {s}; unset {s} to stop using an environment key.\n",
+                    .{ cfg.secret_store.backend_label, credentials.openrouter_api_key_env },
                 );
+                defer alloc.free(message);
+                try writeStdout(deps, message);
                 return .handled_success;
             }
             if (login_provider == .grok) {
@@ -1153,7 +1166,7 @@ fn runNonInteractiveWithDeps(
         },
         .provider => |rest| {
             if (rest.len != 1) {
-                try writeStderr(deps, "usage: fx provider <gateway|codex|grok>\n");
+                try writeStderr(deps, "usage: fx provider <gateway|codex|grok|openrouter>\n");
                 return .handled_failure;
             }
             const target = model_provider.parse(rest[0]) orelse {
@@ -1166,11 +1179,22 @@ fn runNonInteractiveWithDeps(
                 .handled_failure;
         },
         .setup => |rest| {
-            if (rest.len != 0) {
+            const target = parseSetupTarget(rest) orelse {
                 try writeTopLevelUsage(cfg.command_catalog, deps, .setup);
                 return .handled_failure;
-            }
-            return if (try runPasteSetup(alloc, cfg.secret_store, deps)) .handled_success else .handled_failure;
+            };
+            const secret_store = switch (target) {
+                .gateway => cfg.secret_store,
+                .openrouter => cfg.secret_store.forOpenRouter() orelse {
+                    try writeStderr(deps, "fx setup: this host cannot store an OpenRouter key; set " ++
+                        credentials.openrouter_api_key_env ++ " instead\n");
+                    return .handled_failure;
+                },
+            };
+            return if (try runPasteSetup(alloc, secret_store, target, deps))
+                .handled_success
+            else
+                .handled_failure;
         },
         .status => |rest| {
             const opts = parseLocalSurfaceArgs(rest) catch |err| {
@@ -1835,6 +1859,7 @@ fn writeStderr(deps: RunDeps, text: []const u8) !void {
 fn runPasteSetup(
     alloc: Allocator,
     secret_store: host.SecretStore,
+    target: auth_runtime.ApiKeyTarget,
     deps: RunDeps,
 ) !bool {
     if (secret_store.isDisabled()) {
@@ -1846,7 +1871,10 @@ fn runPasteSetup(
         return false;
     }
 
-    try writeStderr(deps, "Paste AI Gateway API key (input hidden): ");
+    try writeStderr(deps, switch (target) {
+        .gateway => "Paste AI Gateway API key (input hidden): ",
+        .openrouter => "Paste OpenRouter API key (input hidden): ",
+    });
     const stored_interactively = secret_store.storeInteractive() catch {
         try writeStderr(deps, "\nfx setup: API key was not saved\n");
         return false;

@@ -45,6 +45,21 @@ const UnavailableSourcePolicy = enum {
     omit,
 };
 
+/// Which provider's slot a pasted key lands in. The entry stage looks the same
+/// either way, so the target decides the prompt, the store and the source the
+/// saved key reloads as.
+pub const ApiKeyTarget = enum {
+    gateway,
+    openrouter,
+
+    pub fn source(self: ApiKeyTarget) credentials.Source {
+        return switch (self) {
+            .gateway => .stored_key,
+            .openrouter => .openrouter_api_key,
+        };
+    }
+};
+
 const max_api_key_entry_bytes: usize = 8 * 1024;
 const max_api_key_mask_glyphs: usize = 32;
 const max_manual_code_mask_glyphs: usize = 32;
@@ -380,26 +395,32 @@ const ApiKeySaveDeps = struct {
     validator: api_key_validator.Provider = api_key_validator.unavailable_provider,
     store: StoredKeyStoreFn = storeUnavailableSecret,
     loader: CredentialLoaderFn = loadCredentialSource,
+    target: ApiKeyTarget = .gateway,
 };
 
 /// The whole save sequence with no runtime state, so outcome behaviour can be
 /// tested synchronously while the worker owns only threading.
 fn performApiKeySave(alloc: Allocator, key: []const u8, deps: ApiKeySaveDeps) ApiKeySaveOutcome {
-    switch (deps.validator.validate(alloc, key)) {
-        .accepted => {},
-        .refused => return .gateway_refused,
-        .unavailable => return .gateway_unavailable,
+    // Only the Gateway key can be checked before it is saved; OpenRouter has no
+    // equivalent probe, so its key is stored on the user's word.
+    if (deps.target == .gateway) {
+        switch (deps.validator.validate(alloc, key)) {
+            .accepted => {},
+            .refused => return .gateway_refused,
+            .unavailable => return .gateway_unavailable,
+        }
     }
+    const target_source = deps.target.source();
     deps.store(deps.ctx, alloc, key) catch |err| {
         debug_trace.logf("auth", "api key save failed step=store err={s}", .{@errorName(err)});
         return .store_failed;
     };
-    const loaded = deps.loader(deps.ctx, alloc, .stored_key) catch |err| {
+    const loaded = deps.loader(deps.ctx, alloc, target_source) catch |err| {
         debug_trace.logf("auth", "api key save failed step=reload err={s}", .{@errorName(err)});
         return .reload_failed;
     };
     const credential = loaded orelse return .reload_failed;
-    if (credential.source != .stored_key) {
+    if (credential.source != target_source) {
         var wrong = credential;
         wrong.deinit(alloc);
         return .reload_failed;
@@ -634,6 +655,7 @@ pub const PickerView = struct {
     sign_in_code_visible: bool = false,
     sign_in_code_mask_count: usize = 0,
     api_key_mask_count: usize = 0,
+    api_key_target: ApiKeyTarget = .gateway,
 
     pub fn activeSourceLabel(self: PickerView) []const u8 {
         return sourceLabelOrMissing(self.active_source);
@@ -1059,6 +1081,7 @@ pub const Runtime = struct {
     sign_in_code_input: std.ArrayList(u8) = .empty,
     api_key_input: std.ArrayList(u8) = .empty,
     api_key_returns_to_root: bool = false,
+    api_key_target: ApiKeyTarget = .gateway,
     api_key_save: ApiKeySaveRuntime = .{},
     inventory_refresh_task: ?*InventoryRefreshTask = null,
 
@@ -1397,6 +1420,7 @@ pub const Runtime = struct {
             .sign_in_code_visible = self.sign_in_code_visible,
             .sign_in_code_mask_count = @min(self.sign_in_code_input.items.len, max_manual_code_mask_glyphs),
             .api_key_mask_count = @min(self.api_key_input.items.len, max_api_key_mask_glyphs),
+            .api_key_target = self.api_key_target,
         };
     }
 
@@ -1497,14 +1521,27 @@ pub const Runtime = struct {
     }
 
     pub fn openApiKeyPicker(self: *Self, alloc: Allocator) void {
-        self.openApiKeyPickerWithParent(alloc, false);
+        self.openApiKeyPickerWithParent(alloc, false, .gateway);
     }
 
     pub fn openApiKeyPickerFromRoot(self: *Self, alloc: Allocator) void {
-        self.openApiKeyPickerWithParent(alloc, true);
+        self.openApiKeyPickerWithParent(alloc, true, .gateway);
     }
 
-    fn openApiKeyPickerWithParent(self: *Self, alloc: Allocator, returns_to_root: bool) void {
+    pub fn openOpenRouterApiKeyPicker(self: *Self, alloc: Allocator) void {
+        self.openApiKeyPickerWithParent(alloc, false, .openrouter);
+    }
+
+    pub fn openOpenRouterApiKeyPickerFromRoot(self: *Self, alloc: Allocator) void {
+        self.openApiKeyPickerWithParent(alloc, true, .openrouter);
+    }
+
+    fn openApiKeyPickerWithParent(
+        self: *Self,
+        alloc: Allocator,
+        returns_to_root: bool,
+        target: ApiKeyTarget,
+    ) void {
         self.exitSignInStage(alloc);
         self.exitApiKeyStage(alloc, .screen_replacement);
         self.clearTeamSelection(alloc);
@@ -1512,6 +1549,7 @@ pub const Runtime = struct {
         self.picker_stage = .api_key;
         self.picker_selection = null;
         self.api_key_returns_to_root = returns_to_root;
+        self.api_key_target = target;
     }
 
     pub fn openSignInPicker(self: *Self, alloc: Allocator) !bool {
@@ -1671,8 +1709,12 @@ pub const Runtime = struct {
         return self.beginApiKeySaveWithDeps(alloc, .{
             .ctx = self,
             .validator = self.api_key_validator,
-            .store = storeRuntimeSecret,
+            .store = switch (self.api_key_target) {
+                .gateway => storeRuntimeSecret,
+                .openrouter => storeRuntimeOpenRouterSecret,
+            },
             .loader = loadRuntimeCredentialSource,
+            .target = self.api_key_target,
         });
     }
 
@@ -1684,14 +1726,18 @@ pub const Runtime = struct {
         self.api_key_input = .empty;
 
         const returns_to_root = self.api_key_returns_to_root;
+        const parent_selection: Choice = switch (self.api_key_target) {
+            .gateway => .{ .action = .setup },
+            .openrouter => .{ .action = .openrouter_key },
+        };
         self.exitApiKeyStage(alloc, .saved);
         self.picker_active = returns_to_root;
         if (!returns_to_root or self.picker_include_skip) {
             self.picker_stage = .root;
-            self.picker_selection = if (returns_to_root) .{ .action = .setup } else null;
+            self.picker_selection = if (returns_to_root) parent_selection else null;
         } else {
             self.picker_stage = .connections;
-            self.picker_selection = .{ .action = .setup };
+            self.picker_selection = parent_selection;
         }
 
         return if (self.api_key_save.start(alloc, key, deps)) .started else .busy;
@@ -1815,8 +1861,8 @@ pub const Runtime = struct {
             .sign_in, .api_key => unreachable,
             .connections => switch (selected) {
                 .action => |action| switch (action) {
-                    .login, .chatgpt_login, .grok_login, .openrouter_key => self.closePicker(alloc),
-                    .setup => {},
+                    .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
+                    .setup, .openrouter_key => {},
                     .connections,
                     .change_team,
                     .switch_credential,
@@ -1844,9 +1890,9 @@ pub const Runtime = struct {
                         self.openSwitchCredentialPicker(alloc);
                         return null;
                     },
-                    .setup => {},
-                    // Only reachable from the Connections screen.
-                    .openrouter_key => unreachable,
+                    // Onboarding shows the connection rows on the root stage, so
+                    // OpenRouter key entry arrives here as well as from Connections.
+                    .setup, .openrouter_key => {},
                     // Only reachable from the switch screen, never the root.
                     .automatic => unreachable,
                     .login, .chatgpt_login, .grok_login => self.closePicker(alloc),
@@ -2237,6 +2283,12 @@ fn loadRuntimeCredentialSource(raw: ?*anyopaque, alloc: Allocator, source: crede
 fn storeRuntimeSecret(raw: ?*anyopaque, alloc: Allocator, value: []const u8) !void {
     const self: *Runtime = @ptrCast(@alignCast(raw.?));
     return self.secret_store.store(alloc, value);
+}
+
+fn storeRuntimeOpenRouterSecret(raw: ?*anyopaque, alloc: Allocator, value: []const u8) !void {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    const store = self.secret_store.forOpenRouter() orelse return error.StoredKeyWriteFailed;
+    return store.store(alloc, value);
 }
 
 fn storeUnavailableSecret(_: ?*anyopaque, _: Allocator, _: []const u8) !void {
@@ -3886,8 +3938,8 @@ test "setup picker offers every provider and reports the OpenRouter key" {
         provider_view.choiceLabel(.{ .provider = .openrouter }),
     );
 
-    // The Connections screen reports whether the key is present in the
-    // environment; it starts no sign-in flow.
+    // The Connections screen reports whether the key is present; selecting it
+    // opens key entry rather than a browser sign-in.
     runtime.openConnectionPicker(alloc);
     const connections = runtime.pickerView();
     try std.testing.expect((Choice{ .action = .openrouter_key }).eql(connections.choiceAt(4).?));
@@ -3901,6 +3953,94 @@ test "setup picker offers every provider and reports the OpenRouter key" {
     );
     connected.closePicker(alloc);
     runtime.closePicker(alloc);
+}
+
+test "OpenRouter key entry is reachable from onboarding and Connections" {
+    const alloc = std.testing.allocator;
+
+    // Onboarding lists the connection rows on the root stage, so the OpenRouter
+    // row must be both selectable and confirmable there.
+    var onboarding: Runtime = .{ .picker_active = true, .picker_include_skip = true };
+    defer onboarding.deinit(alloc);
+    const onboarding_view = onboarding.pickerView();
+    try std.testing.expectEqual(connectionChoiceCount(), onboarding_view.choiceCount());
+    const last_index = onboarding_view.choiceCount() - 1;
+    try std.testing.expect((Choice{ .action = .openrouter_key })
+        .eql(onboarding_view.choiceAt(last_index).?));
+
+    onboarding.picker_selection = .{ .action = .openrouter_key };
+    const taken = onboarding.takePickerChoice(alloc).?;
+    try std.testing.expect((Choice{ .action = .openrouter_key }).eql(taken));
+    // The stage stays open so the host can push key entry onto it.
+    try std.testing.expect(onboarding.picker_active);
+
+    // Key entry records which slot the pasted key belongs to.
+    onboarding.openOpenRouterApiKeyPickerFromRoot(alloc);
+    try std.testing.expect(onboarding.apiKeyEntryActive());
+    try std.testing.expectEqual(ApiKeyTarget.openrouter, onboarding.pickerView().api_key_target);
+
+    var gateway: Runtime = .{};
+    defer gateway.deinit(alloc);
+    gateway.openApiKeyPickerFromRoot(alloc);
+    try std.testing.expectEqual(ApiKeyTarget.gateway, gateway.pickerView().api_key_target);
+}
+
+test "api key save reloads the slot it wrote" {
+    const Probe = struct {
+        stored: []const u8 = &.{},
+        requested: ?credentials.Source = null,
+
+        fn store(raw: ?*anyopaque, _: Allocator, value: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.stored = value;
+        }
+
+        fn load(raw: ?*anyopaque, alloc: Allocator, source: credentials.Source) !?credentials.Credential {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.requested = source;
+            return .{ .token = try alloc.dupe(u8, "reloaded"), .source = source };
+        }
+    };
+
+    // The OpenRouter key has no pre-save probe, so a validator that refuses must
+    // not block it; the Gateway key still runs the check.
+    var probe: Probe = .{};
+    const refusing: api_key_validator.Provider = .{
+        .context = null,
+        .validate_fn = struct {
+            fn validate(_: ?*anyopaque, _: Allocator, _: []const u8) api_key_validator.Result {
+                return .refused;
+            }
+        }.validate,
+    };
+
+    var outcome = performApiKeySave(std.testing.allocator, "or-key", .{
+        .ctx = &probe,
+        .validator = refusing,
+        .store = Probe.store,
+        .loader = Probe.load,
+        .target = .openrouter,
+    });
+    switch (outcome) {
+        .loaded => |*credential| {
+            defer credential.deinit(std.testing.allocator);
+            try std.testing.expectEqual(credentials.Source.openrouter_api_key, credential.source);
+        },
+        else => return error.TestExpectedOpenRouterSave,
+    }
+    try std.testing.expectEqual(credentials.Source.openrouter_api_key, probe.requested.?);
+    try std.testing.expectEqualStrings("or-key", probe.stored);
+
+    var gateway_probe: Probe = .{};
+    const gateway_outcome = performApiKeySave(std.testing.allocator, "gw-key", .{
+        .ctx = &gateway_probe,
+        .validator = refusing,
+        .store = Probe.store,
+        .loader = Probe.load,
+        .target = .gateway,
+    });
+    try std.testing.expectEqual(ApiKeySaveOutcome.gateway_refused, gateway_outcome);
+    try std.testing.expect(gateway_probe.requested == null);
 }
 
 test "provider-scoped credentials never appear as gateway credential choices" {

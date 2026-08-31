@@ -154,7 +154,7 @@ pub fn Runtime(comptime App: type) type {
                     try writeAuthNotice(app, .{
                         .topic = "auth",
                         .tone = .warning,
-                        .body = "Usage: /logout [vercel|codex|grok]",
+                        .body = "Usage: /logout [vercel|codex|grok|openrouter]",
                     });
                     return;
                 };
@@ -330,15 +330,20 @@ pub fn Runtime(comptime App: type) type {
                     .login => try beginSignIn(app, true),
                     .chatgpt_login => try beginChatGptSignIn(app),
                     .grok_login => try beginGrokSignIn(app),
-                    // There is no sign-in flow to start: the key is read from
-                    // the environment, so report how to supply it.
-                    .openrouter_key => try app.writeDomainNotice(.{
-                        .topic = "auth",
-                        .tone = .information,
-                        .body = "OpenRouter reads " ++ credentials.openrouter_api_key_env ++
-                            " from the environment. Set it, restart fx, then choose " ++
-                            "OpenRouter under Model provider.",
-                    }, true),
+                    // There is no browser flow: OpenRouter takes a pasted key, so
+                    // this opens the same masked entry stage the Gateway key uses.
+                    .openrouter_key => {
+                        if (comptime !runtime_profile.allows(App, .native_auth)) {
+                            try app.writeDomainNotice(.{
+                                .topic = "auth",
+                                .tone = .warning,
+                                .body = "API key setup is unavailable in this WASM session.",
+                            }, true);
+                            return;
+                        }
+                        prepareApiKeyInputBoundary(app);
+                        app.auth.openOpenRouterApiKeyPickerFromRoot(app.alloc);
+                    },
                     .setup => {
                         if (comptime !runtime_profile.allows(App, .native_auth)) {
                             try app.writeDomainNotice(.{

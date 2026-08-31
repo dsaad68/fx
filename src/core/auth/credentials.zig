@@ -230,8 +230,8 @@ pub const LoadMode = enum { stored, refresh_if_needed };
 
 const FxLoginRefreshMode = enum { if_needed, force };
 
-/// OpenRouter authenticates with a plain API key supplied through the
-/// environment, so it needs no OAuth session or stored-key slot of its own.
+/// OpenRouter authenticates with a plain API key. The environment wins when it
+/// is set, so a shell override still beats a key saved from `/setup`.
 pub const openrouter_api_key_env = "OPENROUTER_API_KEY";
 
 pub const missing_credential_message = "fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY.";
@@ -240,8 +240,8 @@ pub const missing_chatgpt_credential_message = "fx needs a Codex subscription lo
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login, open Connections, then choose Codex subscription.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
 pub const missing_grok_interactive_credential_message = "Grok needs a subscription login. Run /login, open Connections, then choose Grok subscription.";
-pub const missing_openrouter_credential_message = "fx needs an OpenRouter API key for this model. Set " ++ openrouter_api_key_env ++ ".";
-pub const missing_openrouter_interactive_credential_message = "OpenRouter needs an API key. Set " ++ openrouter_api_key_env ++ " in your environment, then restart fx.";
+pub const missing_openrouter_credential_message = "fx needs an OpenRouter API key for this model. Run fx setup openrouter, or set " ++ openrouter_api_key_env ++ ".";
+pub const missing_openrouter_interactive_credential_message = "OpenRouter needs an API key. Run /setup, open Connections, then choose OpenRouter API key.";
 
 /// Guidance for a provider whose credential is missing. A switch rather than a
 /// fall-through chain, so a new provider cannot silently inherit the Gateway
@@ -378,7 +378,7 @@ pub fn resolveForProvider(
             return .{ .credential = credential };
         },
         .openrouter => {
-            const credential = try loadEnvCredential(alloc, openrouter_api_key_env, .openrouter_api_key);
+            const credential = try loadOpenRouterCredential(alloc, secret_store);
             return .{ .credential = credential };
         },
         .gateway => {},
@@ -517,7 +517,7 @@ pub fn loadSource(
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
-        .openrouter_api_key => loadEnvCredential(alloc, openrouter_api_key_env, source),
+        .openrouter_api_key => loadOpenRouterCredential(alloc, secret_store),
     };
 }
 
@@ -529,7 +529,21 @@ pub fn sourceExists(
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
         .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
-        .openrouter_api_key => nonEmptyEnvValue(openrouter_api_key_env) != null,
+        .openrouter_api_key => blk: {
+            if (nonEmptyEnvValue(openrouter_api_key_env) != null) break :blk true;
+            const openrouter_store = secret_store.forOpenRouter() orelse break :blk false;
+            if (openrouter_store.isDisabled()) break :blk false;
+            const stored = openrouter_store.load(alloc) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    debug_trace.logf("auth", "source probe failed source=openrouter_api_key err={s}", .{@errorName(err)});
+                    break :blk false;
+                },
+            };
+            const value = stored orelse break :blk false;
+            secret.zeroAndFree(alloc, value);
+            break :blk true;
+        },
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -595,6 +609,28 @@ fn loadEnvCredential(
         .token = try alloc.dupe(u8, value),
         .source = source,
     };
+}
+
+/// The environment wins over the saved key so a shell override still works, and
+/// a store that cannot be read falls through to "absent" rather than failing the
+/// whole resolution.
+fn loadOpenRouterCredential(
+    alloc: std.mem.Allocator,
+    secret_store: host.SecretStore,
+) !?Credential {
+    if (try loadEnvCredential(alloc, openrouter_api_key_env, .openrouter_api_key)) |credential| {
+        return credential;
+    }
+    const openrouter_store = secret_store.forOpenRouter() orelse return null;
+    if (openrouter_store.isDisabled()) return null;
+    const value = openrouter_store.load(alloc) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            debug_trace.logf("auth", "openrouter stored key unreadable err={s}", .{@errorName(err)});
+            return null;
+        },
+    };
+    return .{ .token = value orelse return null, .source = .openrouter_api_key };
 }
 
 fn loadStoredKeyCredential(
