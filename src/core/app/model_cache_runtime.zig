@@ -108,6 +108,10 @@ pub const ModelProviderFilter = enum {
     openai,
     xai,
     zai,
+    /// Not a vendor bucket: it names the catalog the models came from, so it
+    /// selects every model and appears only while OpenRouter is the source.
+    /// Sits last among the named tabs, ahead of the Others catch-all.
+    openrouter,
     others,
 };
 
@@ -194,7 +198,7 @@ pub const ModelMenu = struct {
             if (next < 0) next = @as(i32, @intCast(filter_count)) - 1;
             if (next >= @as(i32, @intCast(filter_count))) next = 0;
             const filter: ModelProviderFilter = @enumFromInt(@as(usize, @intCast(next)));
-            if (!modelProviderFilterAvailable(self.items.items, filter)) continue;
+            if (!modelProviderFilterAvailable(self.items.items, filter, self.catalog_state.source)) continue;
             if (next == current) return false;
             self.provider_index = @intCast(next);
             self.selected_index = 0;
@@ -272,18 +276,29 @@ fn providerFilter(provider: []const u8) ModelProviderFilter {
         .others;
 }
 
-pub fn modelProviderFilterAvailable(items: []const ModelMenuItem, filter: ModelProviderFilter) bool {
+pub fn modelProviderFilterAvailable(
+    items: []const ModelMenuItem,
+    filter: ModelProviderFilter,
+    catalog_source: ?credentials.Source,
+) bool {
     if (filter == .all) return true;
+    // The catalog tab is offered by where the models came from, not by what is
+    // in them, so an empty or single-vendor OpenRouter catalog still shows it.
+    if (filter == .openrouter) return catalog_source == .openrouter_api_key;
     var seen = [_]bool{false} ** model_provider_filter_count;
     for (items) |item| seen[@intFromEnum(providerFilter(item.provider))] = true;
 
     var specific_count: usize = 0;
-    for (seen[1..]) |available| specific_count += @intFromBool(available);
+    for (seen, 0..) |available, index| {
+        if (index == @intFromEnum(ModelProviderFilter.all)) continue;
+        if (index == @intFromEnum(ModelProviderFilter.openrouter)) continue;
+        specific_count += @intFromBool(available);
+    }
     return specific_count > 1 and seen[@intFromEnum(filter)];
 }
 
 fn providerMatchesFilter(provider: []const u8, filter: ModelProviderFilter) bool {
-    return filter == .all or providerFilter(provider) == filter;
+    return filter == .all or filter == .openrouter or providerFilter(provider) == filter;
 }
 
 pub const Runtime = struct {

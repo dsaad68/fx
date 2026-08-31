@@ -1,4 +1,5 @@
 const std = @import("std");
+const credentials = @import("../../core/auth/credentials.zig");
 const display_width = @import("../../core/shared/display_width.zig");
 const list_window = @import("../../core/shared/list_window.zig");
 const model_cache_runtime = @import("../../core/app/model_cache_runtime.zig");
@@ -157,7 +158,7 @@ fn composeHeaderRow(alloc: Allocator, projection: ModelMenuProjection, width: u1
     defer row.deinit(alloc);
     try appendHeaderTitle(alloc, &row, projection.filteredItemCount());
 
-    const tabs = ProviderTabs.build(projection.items);
+    const tabs = ProviderTabs.build(projection.items, projection.catalog_state.source);
     const active_position = tabs.activePosition(projection.provider_index);
     const active_index = tabs.indices[active_position];
     const title_width = display_width.visibleWidthIgnoringAnsi(row.items);
@@ -202,11 +203,14 @@ const ProviderTabs = struct {
     indices: [model_cache_runtime.model_provider_filter_count]usize = undefined,
     len: usize = 0,
 
-    fn build(items: []const model_cache_runtime.ModelMenuItem) ProviderTabs {
+    fn build(
+        items: []const model_cache_runtime.ModelMenuItem,
+        catalog_source: ?credentials.Source,
+    ) ProviderTabs {
         var tabs: ProviderTabs = .{};
         for (0..model_cache_runtime.model_provider_filter_count) |index| {
             const filter: model_cache_runtime.ModelProviderFilter = @enumFromInt(index);
-            if (!model_cache_runtime.modelProviderFilterAvailable(items, filter)) continue;
+            if (!model_cache_runtime.modelProviderFilterAvailable(items, filter, catalog_source)) continue;
             tabs.indices[tabs.len] = index;
             tabs.len += 1;
         }
@@ -260,6 +264,7 @@ fn providerTabLabel(index: usize) []const u8 {
         .openai => "OpenAI",
         .xai => "xAI",
         .zai => "Z.AI",
+        .openrouter => "OpenRouter",
         .others => "Others",
     };
 }
@@ -533,7 +538,7 @@ test "model menu keeps active provider visible and omits unknown metadata" {
         .active = true,
         .load_state = .ready,
         .items = &items,
-        .provider_index = 5,
+        .provider_index = @intFromEnum(model_cache_runtime.ModelProviderFilter.others),
     };
 
     const rows = menuRowCount(projection, 42, 5);
@@ -887,4 +892,44 @@ test "token facts abbreviate windows that are not round decimals" {
     try std.testing.expectEqualStrings("262K context", try formatTokenFact(&buf, 262_144, "context"));
     // Small values stay exact.
     try std.testing.expectEqualStrings("512 output", try formatTokenFact(&buf, 512, "output"));
+}
+
+test "OpenRouter catalog offers a tab that selects every model" {
+    const alloc = std.testing.allocator;
+    // Vendors that carry no tab of their own, so nothing but the catalog tab
+    // could group them.
+    const items = [_]model_cache_runtime.ModelMenuItem{
+        .{ .id = @constCast("qwen/qwen3.8-flash"), .provider = "qwen", .capabilities = .{} },
+        .{ .id = @constCast("z-ai/glm-5.2:free"), .provider = "z-ai", .capabilities = .{} },
+        .{ .id = @constCast("anthropic/claude"), .provider = "anthropic", .capabilities = .{} },
+    };
+
+    const openrouter: ModelMenuProjection = .{
+        .active = true,
+        .load_state = .ready,
+        .items = &items,
+        .catalog_state = .{ .access_level = .authenticated, .source = .openrouter_api_key },
+    };
+    const rows = menuRowCount(openrouter, 80, 6);
+    var header = try composeModelMenuRow(alloc, openrouter, 0, 80, rows);
+    defer header.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, header.items, "OpenRouter") != null);
+
+    // The tab keeps the whole catalog rather than filtering it down.
+    const filter = model_cache_runtime.ModelProviderFilter.openrouter;
+    try std.testing.expectEqual(
+        items.len,
+        model_cache_runtime.modelMenuFilteredItemCount(&items, filter, ""),
+    );
+
+    // A Gateway catalog must not offer it, whatever its models are called.
+    const gateway: ModelMenuProjection = .{
+        .active = true,
+        .load_state = .ready,
+        .items = &items,
+        .catalog_state = .{ .access_level = .authenticated, .source = .fx_login },
+    };
+    var gateway_header = try composeModelMenuRow(alloc, gateway, 0, 80, rows);
+    defer gateway_header.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, gateway_header.items, "OpenRouter") == null);
 }
