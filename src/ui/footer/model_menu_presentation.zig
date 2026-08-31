@@ -148,6 +148,7 @@ pub inline fn composeModelMenuRow(
             display_index == layout.selected,
             modelFactsColumn(projection, width),
             width,
+            model_cache_runtime.catalogDisplayPrefix(projection.catalog_state.source),
         );
     }
     return row;
@@ -309,6 +310,7 @@ fn composeTitleRow(
     selected: bool,
     facts_column: ?usize,
     width: u16,
+    catalog_prefix: []const u8,
 ) !std.ArrayList(u8) {
     var row: std.ArrayList(u8) = .empty;
     errdefer row.deinit(alloc);
@@ -325,7 +327,17 @@ fn composeTitleRow(
     const facts_start = facts_column orelse content_width;
     const show_facts = facts.items.len > 0 and facts_start >= prefix_width + 8 + 2;
     const id_budget = if (show_facts) facts_start - prefix_width - 2 else content_width -| prefix_width;
-    try row_text.appendSingleLineMiddleEllipsized(alloc, &row, item.id, id_budget);
+    if (catalog_prefix.len == 0) {
+        try row_text.appendSingleLineMiddleEllipsized(alloc, &row, item.id, id_budget);
+    } else {
+        // Ellipsize the qualified name as one string, so a narrow row trims the
+        // model id rather than the catalog that explains it.
+        var qualified: std.ArrayList(u8) = .empty;
+        defer qualified.deinit(alloc);
+        try qualified.appendSlice(alloc, catalog_prefix);
+        try qualified.appendSlice(alloc, item.id);
+        try row_text.appendSingleLineMiddleEllipsized(alloc, &row, qualified.items, id_budget);
+    }
     if (selected) try row.appendSlice(alloc, ui_render.reset_style);
 
     if (show_facts) {
@@ -566,13 +578,13 @@ test "model menu keeps shared-prefix model ids distinguishable when narrow" {
         .capabilities = .{},
     };
 
-    var alpha_row = try composeTitleRow(alloc, alpha, true, null, 40);
+    var alpha_row = try composeTitleRow(alloc, alpha, true, null, 40, "");
     defer alpha_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, alpha_row.items, "provider/very-lo") != null);
     try std.testing.expect(std.mem.find(u8, alpha_row.items, "reasoning-alpha") != null);
     try std.testing.expect(display_width.visibleWidthIgnoringAnsi(alpha_row.items) <= 40);
 
-    var beta_row = try composeTitleRow(alloc, beta, false, null, 40);
+    var beta_row = try composeTitleRow(alloc, beta, false, null, 40, "");
     defer beta_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, beta_row.items, "provider/very-lo") != null);
     try std.testing.expect(std.mem.find(u8, beta_row.items, "reasoning-beta") != null);
@@ -852,7 +864,7 @@ test "model menu shows a Free fact for zero-cost models" {
         .id = @constCast("z-ai/glm-5.2:free"),
         .provider = "z-ai",
         .capabilities = .{ .context_window = 1_000_000, .is_free = true },
-    }, false, 40, 120);
+    }, false, 40, 120, "");
     defer free_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, free_row.items, "1M context · Free") != null);
     try std.testing.expect(std.mem.find(u8, free_row.items, "z-ai/glm-5.2:free") != null);
@@ -861,7 +873,7 @@ test "model menu shows a Free fact for zero-cost models" {
         .id = @constCast("qwen/qwen3.8-flash"),
         .provider = "qwen",
         .capabilities = .{ .context_window = 1_000_000 },
-    }, false, 40, 120);
+    }, false, 40, 120, "");
     defer paid_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, paid_row.items, "Free") == null);
 }
@@ -932,4 +944,64 @@ test "OpenRouter catalog offers a tab that selects every model" {
     var gateway_header = try composeModelMenuRow(alloc, gateway, 0, 80, rows);
     defer gateway_header.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, gateway_header.items, "OpenRouter") == null);
+}
+
+test "OpenRouter rows name the catalog ahead of the model id" {
+    const alloc = std.testing.allocator;
+    const item: model_cache_runtime.ModelMenuItem = .{
+        .id = @constCast("google/gemma-4-26b-a4b-it:free"),
+        .provider = "google",
+        .capabilities = .{ .context_window = 262_144, .is_free = true },
+    };
+    const items = [_]model_cache_runtime.ModelMenuItem{item};
+
+    var titled = try composeTitleRow(alloc, item, false, null, 120, "openrouter/");
+    defer titled.deinit(alloc);
+    try std.testing.expect(
+        std.mem.find(u8, titled.items, "openrouter/google/gemma-4-26b-a4b-it:free") != null,
+    );
+
+    // Middle ellipsis must eat the model id, never the catalog that explains it.
+    var narrow = try composeTitleRow(alloc, item, false, null, 24, "openrouter/");
+    defer narrow.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, narrow.items, "openrouter") != null);
+
+    const openrouter: ModelMenuProjection = .{
+        .active = true,
+        .load_state = .ready,
+        .items = &items,
+        .catalog_state = .{ .access_level = .authenticated, .source = .openrouter_api_key },
+    };
+    const rows = menuRowCount(openrouter, 120, 6);
+    var row = try composeModelMenuRow(alloc, openrouter, 2, 120, rows);
+    defer row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, row.items, "openrouter/goog") != null);
+
+    // Shown means findable: a query carrying the displayed prefix must match,
+    // and the bare id must keep working.
+    for ([_][]const u8{ "openrouter/google", "openrouter", "gemma" }) |query| {
+        try std.testing.expectEqual(@as(usize, 1), model_cache_runtime.modelMenuFilteredItemCountFor(
+            &items,
+            .all,
+            query,
+            .openrouter_api_key,
+        ));
+    }
+
+    // A Gateway catalog neither prefixes the row nor invents the match.
+    const gateway: ModelMenuProjection = .{
+        .active = true,
+        .load_state = .ready,
+        .items = &items,
+        .catalog_state = .{ .access_level = .authenticated, .source = .fx_login },
+    };
+    var gateway_row = try composeModelMenuRow(alloc, gateway, 2, 120, rows);
+    defer gateway_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, gateway_row.items, "openrouter/") == null);
+    try std.testing.expectEqual(@as(usize, 0), model_cache_runtime.modelMenuFilteredItemCountFor(
+        &items,
+        .all,
+        "openrouter",
+        .fx_login,
+    ));
 }

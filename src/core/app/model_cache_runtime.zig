@@ -160,11 +160,22 @@ pub const ModelMenu = struct {
     }
 
     pub fn filteredItemCount(self: *const ModelMenu) usize {
-        return modelMenuFilteredItemCount(self.items.items, self.providerFilter(), self.query());
+        return modelMenuFilteredItemCountFor(
+            self.items.items,
+            self.providerFilter(),
+            self.query(),
+            self.catalog_state.source,
+        );
     }
 
     pub fn itemAt(self: *const ModelMenu, display_index: usize) ?*const ModelMenuItem {
-        return modelMenuItemAt(self.items.items, self.providerFilter(), self.query(), display_index);
+        return modelMenuItemAtFor(
+            self.items.items,
+            self.providerFilter(),
+            self.query(),
+            display_index,
+            self.catalog_state.source,
+        );
     }
 
     pub fn moveVisibleItems(self: *ModelMenu, delta: i32, visible_items: u16) bool {
@@ -229,9 +240,18 @@ pub fn modelMenuFilteredItemCount(
     provider_filter: ModelProviderFilter,
     query: []const u8,
 ) usize {
+    return modelMenuFilteredItemCountFor(items, provider_filter, query, null);
+}
+
+pub fn modelMenuFilteredItemCountFor(
+    items: []const ModelMenuItem,
+    provider_filter: ModelProviderFilter,
+    query: []const u8,
+    catalog_source: ?credentials.Source,
+) usize {
     var count: usize = 0;
     for (items) |item| {
-        if (modelMenuItemMatches(item, provider_filter, query)) count += 1;
+        if (modelMenuItemMatches(item, provider_filter, query, catalog_source)) count += 1;
     }
     return count;
 }
@@ -242,9 +262,19 @@ pub fn modelMenuItemAt(
     query: []const u8,
     display_index: usize,
 ) ?*const ModelMenuItem {
+    return modelMenuItemAtFor(items, provider_filter, query, display_index, null);
+}
+
+pub fn modelMenuItemAtFor(
+    items: []const ModelMenuItem,
+    provider_filter: ModelProviderFilter,
+    query: []const u8,
+    display_index: usize,
+    catalog_source: ?credentials.Source,
+) ?*const ModelMenuItem {
     var current: usize = 0;
     for (items) |*item| {
-        if (!modelMenuItemMatches(item.*, provider_filter, query)) continue;
+        if (!modelMenuItemMatches(item.*, provider_filter, query, catalog_source)) continue;
         if (current == display_index) return item;
         current += 1;
     }
@@ -255,12 +285,22 @@ fn modelMenuItemMatches(
     item: ModelMenuItem,
     provider_filter: ModelProviderFilter,
     query: []const u8,
+    catalog_source: ?credentials.Source,
 ) bool {
     if (!providerMatchesFilter(item.provider, provider_filter)) return false;
     const query_text = std.mem.trim(u8, query, " \t\r\n");
-    return query_text.len == 0 or
-        text_utils.containsIgnoreCase(item.id, query_text) or
-        text_utils.containsIgnoreCase(item.provider, query_text);
+    if (query_text.len == 0) return true;
+    if (text_utils.containsIgnoreCase(item.id, query_text) or
+        text_utils.containsIgnoreCase(item.provider, query_text)) return true;
+    // The list shows the catalog ahead of the id, so a query that includes that
+    // prefix must still find the row it is looking at.
+    const prefix = catalogDisplayPrefix(catalog_source);
+    if (prefix.len == 0) return false;
+    var qualified_buf: [512]u8 = undefined;
+    if (prefix.len + item.id.len > qualified_buf.len) return false;
+    @memcpy(qualified_buf[0..prefix.len], prefix);
+    @memcpy(qualified_buf[prefix.len..][0..item.id.len], item.id);
+    return text_utils.containsIgnoreCase(qualified_buf[0 .. prefix.len + item.id.len], query_text);
 }
 
 fn providerFilter(provider: []const u8) ModelProviderFilter {
@@ -274,6 +314,16 @@ fn providerFilter(provider: []const u8) ModelProviderFilter {
         .zai
     else
         .others;
+}
+
+/// The catalog a model came from, shown ahead of the model id so the route is
+/// visible in the list. It is display only: the id sent to the provider, saved
+/// as the preference, and matched against the catalog stays unprefixed.
+pub fn catalogDisplayPrefix(catalog_source: ?credentials.Source) []const u8 {
+    return switch (catalog_source orelse return "") {
+        .openrouter_api_key => "openrouter/",
+        else => "",
+    };
 }
 
 pub fn modelProviderFilterAvailable(
