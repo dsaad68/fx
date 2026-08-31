@@ -90,22 +90,11 @@ pub const ModelMenuProjection = struct {
     }
 
     pub fn filteredItemCount(self: ModelMenuProjection) usize {
-        return model_cache_runtime.modelMenuFilteredItemCountFor(
-            self.items,
-            self.providerFilter(),
-            self.query,
-            self.catalog_state.source,
-        );
+        return model_cache_runtime.modelMenuFilteredItemCount(self.items, self.providerFilter(), self.query);
     }
 
     pub fn itemAt(self: ModelMenuProjection, display_index: usize) ?*const model_cache_runtime.ModelMenuItem {
-        return model_cache_runtime.modelMenuItemAtFor(
-            self.items,
-            self.providerFilter(),
-            self.query,
-            display_index,
-            self.catalog_state.source,
-        );
+        return model_cache_runtime.modelMenuItemAt(self.items, self.providerFilter(), self.query, display_index);
     }
 };
 
