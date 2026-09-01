@@ -134,8 +134,11 @@ fn setupChoiceValue(view: auth_runtime.PickerView, choice: auth_runtime.Choice) 
                     "environment"
                 else
                     "not configured",
+                // A stored key and an environment key resolve to the same
+                // source, so the row cannot tell them apart and must not claim
+                // one. It reported "environment" for a key in the key store.
                 .openrouter_key => if (view.available_sources.contains(.openrouter_api_key))
-                    "environment"
+                    "configured"
                 else
                     "not configured",
                 .connections, .change_team, .switch_credential, .switch_provider, .automatic => "",

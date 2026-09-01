@@ -363,7 +363,9 @@ pub const ApiKeySaveStart = enum {
 
 pub const ApiKeySaveResult = union(enum) {
     empty,
-    saved: bool,
+    /// Carries the source the key reloaded as, so the caller can finish the
+    /// flow for the provider whose key was actually saved.
+    saved: struct { changed: bool, source: credentials.Source },
     gateway_refused,
     gateway_unavailable,
     store_failed,
@@ -1759,8 +1761,12 @@ pub const Runtime = struct {
             .loaded => |*credential| blk: {
                 var owned = credential.*;
                 outcome = .reload_failed;
+                const source = owned.source;
                 defer owned.deinit(alloc);
-                break :blk .{ .saved = self.adoptCredential(alloc, &owned) };
+                break :blk .{ .saved = .{
+                    .changed = self.adoptCredential(alloc, &owned),
+                    .source = source,
+                } };
             },
         };
     }
@@ -3663,7 +3669,7 @@ test "api key stage zeroes its allocation on every exit path" {
         defer outcome.deinit(alloc);
         runtime.exitApiKeyStage(alloc, .saved);
         const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
+            .loaded => .{ .saved = .{ .changed = true, .source = .stored_key } },
             .gateway_refused => .gateway_refused,
             .gateway_unavailable => .gateway_unavailable,
             .store_failed => .store_failed,
@@ -3692,7 +3698,7 @@ test "api key stage zeroes its allocation on every exit path" {
         defer outcome.deinit(alloc);
         runtime.exitApiKeyStage(alloc, .saved);
         const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
+            .loaded => .{ .saved = .{ .changed = true, .source = .stored_key } },
             .gateway_refused => .gateway_refused,
             .gateway_unavailable => .gateway_unavailable,
             .store_failed => .store_failed,
@@ -3721,7 +3727,7 @@ test "api key stage zeroes its allocation on every exit path" {
         defer outcome.deinit(alloc);
         runtime.exitApiKeyStage(alloc, .saved);
         const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
+            .loaded => .{ .saved = .{ .changed = true, .source = .stored_key } },
             .gateway_refused => .gateway_refused,
             .gateway_unavailable => .gateway_unavailable,
             .store_failed => .store_failed,
@@ -3750,7 +3756,7 @@ test "api key stage zeroes its allocation on every exit path" {
         defer outcome.deinit(alloc);
         runtime.exitApiKeyStage(alloc, .saved);
         const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
+            .loaded => .{ .saved = .{ .changed = true, .source = .stored_key } },
             .gateway_refused => .gateway_refused,
             .gateway_unavailable => .gateway_unavailable,
             .store_failed => .store_failed,
@@ -3779,7 +3785,7 @@ test "api key stage zeroes its allocation on every exit path" {
         defer outcome.deinit(alloc);
         runtime.exitApiKeyStage(alloc, .saved);
         const result: ApiKeySaveResult = switch (outcome) {
-            .loaded => .{ .saved = true },
+            .loaded => .{ .saved = .{ .changed = true, .source = .stored_key } },
             .gateway_refused => .gateway_refused,
             .gateway_unavailable => .gateway_unavailable,
             .store_failed => .store_failed,

@@ -512,6 +512,40 @@ pub fn Runtime(comptime App: type) type {
             }
         }
 
+        fn savedKeyLabel(source: credentials.Source) []const u8 {
+            return switch (source) {
+                .openrouter_api_key => "OpenRouter",
+                else => "AI Gateway",
+            };
+        }
+
+        /// A saved key ends the flow the same way a completed sign-in does. Every
+        /// OAuth path closes the picker on success; key entry used to return to
+        /// the screen behind it, which left onboarding sitting on the welcome
+        /// copy with no way to tell the key had taken.
+        fn finishApiKeySave(app: *App, source: credentials.Source) !void {
+            if (source != .openrouter_api_key) {
+                // The Gateway key is a credential for the current route, so only
+                // onboarding ends here; /setup returns to Connections as before.
+                if (app.auth.pickerView().include_skip) app.auth.closePicker(app.alloc);
+                return;
+            }
+            switch (auth_transition.signInCompletion(
+                .openrouter,
+                comptime provider_runtime.supported(App),
+            )) {
+                .vercel => unreachable,
+                .switch_provider => |target| {
+                    app.auth.closePicker(app.alloc);
+                    try switchProvider(app, target, false, .post_oauth);
+                },
+                .activate_source => |activate| {
+                    _ = selectCredentialSource(app, activate) catch false;
+                    app.auth.closePicker(app.alloc);
+                },
+            }
+        }
+
         fn prepareApiKeyInputBoundary(app: *App) void {
             if (comptime @hasDecl(App, "prepareApiKeyInputBoundary")) {
                 app.prepareApiKeyInputBoundary();
@@ -541,13 +575,13 @@ pub fn Runtime(comptime App: type) type {
         fn applyApiKeySaveResult(app: *App, result: auth_runtime.ApiKeySaveResult) !void {
             switch (result) {
                 .empty => return,
-                .saved => |changed| {
-                    applyCredentialChange(app, changed);
-                    rememberCredentialSource(app, .stored_key);
+                .saved => |saved| {
+                    applyCredentialChange(app, saved.changed);
+                    rememberCredentialSource(app, saved.source);
                     const body = try std.fmt.allocPrint(
                         app.alloc,
-                        "Saved the API key to {s} and made it active.",
-                        .{credentials.stored_key_backend_label},
+                        "Saved the {s} API key to {s} and made it active.",
+                        .{ savedKeyLabel(saved.source), credentials.stored_key_backend_label },
                     );
                     defer app.alloc.free(body);
                     try app.writeDomainNotice(.{
@@ -555,6 +589,7 @@ pub fn Runtime(comptime App: type) type {
                         .tone = .neutral,
                         .body = body,
                     }, true);
+                    try finishApiKeySave(app, saved.source);
                 },
                 .gateway_refused => try app.writeDomainNotice(.{
                     .topic = "auth",
@@ -655,7 +690,9 @@ pub fn Runtime(comptime App: type) type {
         fn rememberCredentialSource(app: *App, source: credentials.Source) void {
             // ChatGPT is selected by model route, not as a global Gateway
             // credential preference. Its saved session coexists independently.
-            if (source == .chatgpt_subscription or source == .grok_subscription) return;
+            if (source == .chatgpt_subscription or
+                source == .grok_subscription or
+                source == .openrouter_api_key) return;
             if (comptime @hasDecl(App, "persistCredentialSourcePreference")) {
                 app.persistCredentialSourcePreference(source);
                 return;
@@ -1608,6 +1645,7 @@ const TestAuth = struct {
     picker_opened: bool = false,
     picker_provider: model_provider.ProviderId = .gateway,
     picker_closed: bool = false,
+    picker_include_skip: bool = false,
     gateway_ready: bool = true,
     catalog_ready: bool = true,
     gateway_ready_after_refresh_count: ?usize = null,
@@ -1699,13 +1737,13 @@ const TestAuth = struct {
         return false;
     }
 
-    fn pickerView(_: *const TestAuth) auth_runtime.PickerView {
+    fn pickerView(self: *const TestAuth) auth_runtime.PickerView {
         return .{
             .active = false,
             .available_sources = .empty,
             .selected_choice = null,
             .active_source = null,
-            .include_skip = false,
+            .include_skip = self.picker_include_skip,
         };
     }
 
@@ -2220,11 +2258,58 @@ test "successful API key save persists even when the live credential is unchange
     defer app.deinit();
     app.auth.active_source = .stored_key;
 
-    try Runtime(TestApp).applyApiKeySaveResult(&app, .{ .saved = false });
+    try Runtime(TestApp).applyApiKeySaveResult(&app, .{ .saved = .{ .changed = false, .source = .stored_key } });
 
     try std.testing.expectEqual(credentials.Source.stored_key, app.auth.active_source.?);
     try std.testing.expectEqual(@as(usize, 1), app.preference_write_count);
     try std.testing.expectEqual(credentials.Source.stored_key, app.last_preference_source.?);
+}
+
+test "a saved key ends the flow instead of leaving onboarding open" {
+    // Onboarding shows the welcome copy on the root stage. Every OAuth path
+    // closes the picker on success, so a saved key must too; leaving it open
+    // reads as the key never having taken.
+    var gateway: TestApp = .{};
+    defer gateway.deinit();
+    gateway.auth.active_source = .stored_key;
+    gateway.auth.picker_include_skip = true;
+
+    try Runtime(TestApp).applyApiKeySaveResult(&gateway, .{
+        .saved = .{ .changed = true, .source = .stored_key },
+    });
+    try std.testing.expect(gateway.auth.picker_closed);
+
+    // Outside onboarding the Gateway key returns to Connections as before.
+    var hub: TestApp = .{};
+    defer hub.deinit();
+    hub.auth.active_source = .stored_key;
+
+    try Runtime(TestApp).applyApiKeySaveResult(&hub, .{
+        .saved = .{ .changed = true, .source = .stored_key },
+    });
+    try std.testing.expect(!hub.auth.picker_closed);
+}
+
+test "a saved OpenRouter key activates OpenRouter and is not a gateway preference" {
+    var app: TestApp = .{};
+    defer app.deinit();
+    app.auth.active_source = .openrouter_api_key;
+    app.auth.picker_include_skip = true;
+
+    try Runtime(TestApp).applyApiKeySaveResult(&app, .{
+        .saved = .{ .changed = true, .source = .openrouter_api_key },
+    });
+
+    // Unlike the Gateway key, this one ends the flow from the hub too, the way
+    // a Codex or Grok sign-in does.
+    try std.testing.expect(app.auth.picker_closed);
+    // The key is scoped to its own route, so it must not be recorded as the
+    // credential the Gateway should prefer.
+    try std.testing.expectEqual(@as(usize, 0), app.preference_write_count);
+    try std.testing.expect(app.last_preference_source == null);
+    try std.testing.expect(
+        std.mem.find(u8, app.transcript.items, "OpenRouter API key") != null,
+    );
 }
 
 test "successful API key save remembers the newly active stored key" {
@@ -2232,7 +2317,7 @@ test "successful API key save remembers the newly active stored key" {
     defer app.deinit();
     app.auth.active_source = .stored_key;
 
-    try Runtime(TestApp).applyApiKeySaveResult(&app, .{ .saved = true });
+    try Runtime(TestApp).applyApiKeySaveResult(&app, .{ .saved = .{ .changed = true, .source = .stored_key } });
 
     try std.testing.expectEqual(credentials.Source.stored_key, app.auth.active_source.?);
     try std.testing.expectEqual(@as(usize, 1), app.preference_write_count);
