@@ -2137,8 +2137,8 @@ test "auth onboarding composes the welcome copy and setup choices" {
     try std.testing.expect(std.mem.find(u8, screen.items, "⚠︎ Note: fx is experimental and defaults to auto mode. \x1b]8;id=fx-onboarding;https://fx.sh/docs/stability\x1b\\\x1b[4mLearn more\x1b[24m\x1b]8;;\x1b\\") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Learn more: https://") == null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Vercel") != null);
-    try std.testing.expect(std.mem.find(u8, screen.items, "Add an API key") != null);
-    try std.testing.expect(std.mem.find(u8, screen.items, "OpenRouter API key") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Add an AI Gateway API key") != null);
+    try std.testing.expect(std.mem.find(u8, screen.items, "Add an OpenRouter API key") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Esc to set up later · Explore all commands with /help") != null);
 
     var body_row = try composeAuthPickerRow(alloc, view, 2, authPickerRowCount(view), 100);
@@ -2163,11 +2163,11 @@ test "auth onboarding composes the welcome copy and setup choices" {
 
     var unselected_row = try composeAuthPickerRow(alloc, view, 11, authPickerRowCount(view), 100);
     defer unselected_row.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, unselected_row.items, "Add an API key") != null);
+    try std.testing.expect(std.mem.find(u8, unselected_row.items, "Add an AI Gateway API key") != null);
 
     var openrouter_row = try composeAuthPickerRow(alloc, view, 12, authPickerRowCount(view), 100);
     defer openrouter_row.deinit(alloc);
-    try std.testing.expect(std.mem.find(u8, openrouter_row.items, "OpenRouter API key") != null);
+    try std.testing.expect(std.mem.find(u8, openrouter_row.items, "Add an OpenRouter API key") != null);
 
     var narrow_note = try composeAuthPickerRow(alloc, view, 13, authPickerRowCount(view), 58);
     defer narrow_note.deinit(alloc);
@@ -2182,7 +2182,7 @@ test "auth onboarding composes the welcome copy and setup choices" {
         try compact_screen.append(alloc, '\n');
     }
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Vercel") != null);
-    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Add an API key") != null);
+    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Add an AI Gateway API key") != null);
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Codex") != null);
     try std.testing.expect(std.mem.find(u8, screen.items, "Sign in with Grok") != null);
 }

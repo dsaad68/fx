@@ -753,8 +753,13 @@ pub const PickerView = struct {
                 .login => "Sign in with Vercel",
                 .chatgpt_login => "Sign in with Codex",
                 .grok_login => "Sign in with Grok",
-                .openrouter_key => "OpenRouter API key",
-                .setup => if (self.include_skip) "Add an API key" else "API key",
+                // Onboarding is the one screen with no heading naming the
+                // provider, so each key row says which key it takes.
+                .openrouter_key => if (self.include_skip)
+                    "Add an OpenRouter API key"
+                else
+                    "OpenRouter API key",
+                .setup => if (self.include_skip) "Add an AI Gateway API key" else "API key",
                 .change_team => "Change team",
                 .switch_credential => "Switch credential",
                 .switch_provider => "Switch provider",
@@ -3284,9 +3289,12 @@ test "auth onboarding picker exposes the setup paths" {
     try std.testing.expect((Choice{ .action = .chatgpt_login }).eql(picker.choiceAt(1).?));
     try std.testing.expect((Choice{ .action = .grok_login }).eql(picker.choiceAt(2).?));
     try std.testing.expect((Choice{ .action = .setup }).eql(picker.choiceAt(3).?));
-    try std.testing.expectEqualStrings("Add an API key", picker.choiceLabel(picker.choiceAt(3).?));
+    try std.testing.expectEqualStrings("Add an AI Gateway API key", picker.choiceLabel(picker.choiceAt(3).?));
     try std.testing.expect((Choice{ .action = .openrouter_key }).eql(picker.choiceAt(4).?));
-    try std.testing.expectEqualStrings("OpenRouter API key", picker.choiceLabel(picker.choiceAt(4).?));
+    try std.testing.expectEqualStrings(
+        "Add an OpenRouter API key",
+        picker.choiceLabel(picker.choiceAt(4).?),
+    );
     try std.testing.expect(picker.choiceAt(5) == null);
 }
 
