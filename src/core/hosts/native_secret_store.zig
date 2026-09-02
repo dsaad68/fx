@@ -341,6 +341,13 @@ test "provider slots keep their keys apart" {
     try storeInDir(std.testing.allocator, &fx_dir, gateway_slot, "gateway-value");
     try storeInDir(std.testing.allocator, &fx_dir, openrouter_slot, "openrouter-value");
 
+    // The profile file is the whole store on every non-macOS target, so the
+    // new slot must be created as privately as the one it sits beside.
+    for ([_]Slot{ gateway_slot, openrouter_slot }) |slot| {
+        const stat = try tmp.dir.statFile(std.testing.io, slot.file_name, .{});
+        try std.testing.expect(stat.permissions.toMode() & 0o777 == 0o600);
+    }
+
     const gateway_key = (try loadFromDir(std.testing.allocator, &fx_dir.dir, gateway_slot)) orelse
         return error.TestUnexpectedMissingStoredKey;
     defer secret.zeroAndFree(std.testing.allocator, gateway_key);
