@@ -1018,7 +1018,7 @@ fn runNonInteractiveWithDeps(
                         );
                         return .handled_failure;
                     }
-                    if (!try activateProviderSelection(alloc, cfg, deps, .openrouter, .provider_login)) {
+                    if (!try activateProviderSelection(alloc, cfg, deps, .openrouter, .provider_login, null)) {
                         return .handled_failure;
                     }
                     try writeStdout(deps, "Using OpenRouter.\n");

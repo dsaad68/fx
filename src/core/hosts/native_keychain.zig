@@ -157,6 +157,10 @@ pub fn contains() Error!host.SecretStorePresence {
     return containsService(service_name);
 }
 
+pub fn servicePresence(service: []const u8) Error!host.SecretStorePresence {
+    return containsService(service);
+}
+
 pub fn oauthSessionPresence() Error!host.SecretStorePresence {
     return containsService(oauth_session_service_name);
 }

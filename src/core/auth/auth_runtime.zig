@@ -255,6 +255,7 @@ fn requestedSource(
         .gateway => preferred,
         .codex => .chatgpt_subscription,
         .grok => .grok_subscription,
+        .openrouter => .openrouter_api_key,
     };
 }
 
@@ -1113,7 +1114,7 @@ pub const Runtime = struct {
         secret_store: host.SecretStore,
     ) void {
         comptime {
-            if (std.meta.fields(Self).len != 26) {
+            if (std.meta.fields(Self).len != 27) {
                 @compileError("update Runtime.initInto for the changed field set");
             }
         }
@@ -1142,6 +1143,7 @@ pub const Runtime = struct {
         storage.sign_in_code_input = .empty;
         storage.api_key_input = .empty;
         storage.api_key_returns_to_root = false;
+        storage.api_key_target = .gateway;
         storage.api_key_save = .{};
         storage.inventory_refresh_task = null;
     }

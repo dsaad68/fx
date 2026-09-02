@@ -529,21 +529,9 @@ pub fn sourceExists(
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
         .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
-        .openrouter_api_key => blk: {
-            if (nonEmptyEnvValue(openrouter_api_key_env) != null) break :blk true;
-            const openrouter_store = secret_store.forOpenRouter() orelse break :blk false;
-            if (openrouter_store.isDisabled()) break :blk false;
-            const stored = openrouter_store.load(alloc) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => {
-                    debug_trace.logf("auth", "source probe failed source=openrouter_api_key err={s}", .{@errorName(err)});
-                    break :blk false;
-                },
-            };
-            const value = stored orelse break :blk false;
-            secret.zeroAndFree(alloc, value);
-            break :blk true;
-        },
+        // Probing must not read the key: on macOS that spawns a Keychain read
+        // on every inventory refresh. Presence answers from metadata alone.
+        .openrouter_api_key => sourcePresence(secret_store, source) == .present,
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -587,6 +575,12 @@ pub fn sourcePresence(
             .missing,
         .ai_gateway_api_key => if (nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null)
             .present
+        else
+            .missing,
+        .openrouter_api_key => if (nonEmptyEnvValue(openrouter_api_key_env) != null)
+            .present
+        else if (secret_store.forOpenRouter()) |openrouter_store|
+            if (openrouter_store.isDisabled()) .missing else openrouter_store.presence()
         else
             .missing,
         .fx_login => oauth_session.presence(),

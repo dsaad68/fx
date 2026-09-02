@@ -48,6 +48,7 @@ pub const provider: host.SecretStore = .{
 pub const openrouter_provider: host.SecretStore = .{
     .backend_label = backend_label,
     .is_disabled_fn = isDisabledCallback,
+    .presence_fn = presenceOpenRouterCallback,
     .load_fn = loadOpenRouterCallback,
     .store_fn = storeOpenRouterCallback,
     .store_interactive_fn = storeOpenRouterInteractiveCallback,
@@ -89,14 +90,22 @@ fn isDisabledCallback(_: ?*anyopaque) bool {
 }
 
 fn presenceCallback(_: ?*anyopaque) host.SecretStorePresence {
-    if (isDisabled()) return .missing;
-    if (comptime builtin.os.tag == .macos) {
-        return keychain.contains() catch .unavailable;
-    }
-    return presenceInProfile();
+    return presence(gateway_slot);
 }
 
-fn presenceInProfile() host.SecretStorePresence {
+fn presenceOpenRouterCallback(_: ?*anyopaque) host.SecretStorePresence {
+    return presence(openrouter_slot);
+}
+
+fn presence(slot: Slot) host.SecretStorePresence {
+    if (isDisabled()) return .missing;
+    if (comptime builtin.os.tag == .macos) {
+        return keychain.servicePresence(slot.service) catch .unavailable;
+    }
+    return presenceInProfile(slot);
+}
+
+fn presenceInProfile(slot: Slot) host.SecretStorePresence {
     const home = io_mod.getenv("HOME") orelse return .unavailable;
     var home_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{}) catch
         return .unavailable;
@@ -105,7 +114,7 @@ fn presenceInProfile() host.SecretStorePresence {
         .follow_symlinks = false,
     }) catch |err| return if (err == error.FileNotFound) .missing else .unavailable;
     defer fx_dir.close(io_mod.getIo());
-    const stat = fx_dir.statFile(io_mod.getIo(), profile_paths.api_key_file_name, .{
+    const stat = fx_dir.statFile(io_mod.getIo(), slot.file_name, .{
         .follow_symlinks = false,
     }) catch |err| return if (err == error.FileNotFound) .missing else .unavailable;
     if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return .unavailable;

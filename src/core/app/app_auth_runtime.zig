@@ -1312,6 +1312,7 @@ pub fn Runtime(comptime App: type) type {
                         .fx_login => "Run /login to repair this source.",
                         .chatgpt_subscription => "Run /login and reconnect Codex to repair this source.",
                         .grok_subscription => "Run /login and reconnect Grok to repair this source.",
+                        .openrouter_api_key => "Run /setup, open Connections, then choose OpenRouter API key.",
                         .vercel_oidc_token, .ai_gateway_api_key, .stored_key => "Run /setup to repair this source.",
                     },
                 },
